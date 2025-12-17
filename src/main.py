@@ -16,11 +16,12 @@ from aiogram.types import (
     ReplyKeyboardRemove,
     KeyboardButton,
     Contact,
+    FSInputFile,
 )
 
 from sqlalchemy import and_, func, select
 
-from .bot_states import TestStates, RegistrationStates, AdminStates
+from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates
 from .config import settings
 from .db import get_session, init_db
 from .models import (
@@ -905,6 +906,187 @@ async def handle_teacher_identifier(message: Message, state: FSMContext) -> None
             )
     
     await state.clear()
+
+
+# ========== UPLOAD WORDS HANDLERS ==========
+
+@dp.message(Command("upload_words"))
+async def cmd_upload_words(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
+        await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
+        return
+    
+    await state.set_state(UploadWordsStates.choosing_level)
+    await message.answer(
+        "So'zlar ro'yxatini yuklash.\n\n"
+        "Qaysi CEFR darajasiga so'zlar qo'shamiz?",
+        reply_markup=build_levels_keyboard()
+    )
+
+
+@dp.callback_query(UploadWordsStates.choosing_level, F.data.startswith("level:"))
+async def upload_choose_level(callback: CallbackQuery, state: FSMContext) -> None:
+    level = callback.data.split(":", 1)[1]
+    await state.update_data(cefr_level=level)
+    await state.set_state(UploadWordsStates.waiting_file)
+    await callback.message.edit_text(
+        f"CEFR daraja: <b>{level}</b>\n\n"
+        "Endi .txt yoki .docx fayl yuboring.\n\n"
+        "Format: har bir qatorda <code>turkish_word - uzbek_translation</code>"
+    )
+    await callback.answer()
+
+
+@dp.message(UploadWordsStates.waiting_file, F.document)
+async def handle_upload_file(message: Message, state: FSMContext) -> None:
+    document = message.document
+    
+    if not document:
+        await message.answer("Fayl topilmadi. Iltimos, .txt yoki .docx fayl yuboring.")
+        return
+    
+    file_name = document.file_name or ""
+    
+    # Check file extension
+    if not (file_name.endswith(".txt") or file_name.endswith(".docx")):
+        await message.answer("Faqat .txt yoki .docx fayllar qabul qilinadi.")
+        return
+    
+    data = await state.get_data()
+    cefr_level = data.get("cefr_level")
+    
+    if not cefr_level:
+        await message.answer("Xatolik: CEFR daraja tanlanmagan.")
+        await state.clear()
+        return
+    
+    user = await get_or_create_user(message.from_user)
+    
+    # Download file
+    await message.answer("Fayl yuklanmoqda va tahlil qilinmoqda...")
+    
+    try:
+        file = await bot.get_file(document.file_id)
+        file_path = file.file_path
+        
+        # Download file content
+        import os
+        import aiofiles
+        
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file_path = os.path.join(temp_dir, file_name)
+        
+        await bot.download_file(file_path, temp_file_path)
+        
+        # Parse file
+        words_parsed = []
+        
+        if file_name.endswith(".txt"):
+            async with aiofiles.open(temp_file_path, "r", encoding="utf-8") as f:
+                content = await f.read()
+                lines = content.split("\n")
+        else:  # .docx
+            try:
+                from docx import Document
+                doc = Document(temp_file_path)
+                lines = [para.text for para in doc.paragraphs if para.text.strip()]
+            except ImportError:
+                await message.answer(
+                    "❌ .docx fayllarni qo'llab-quvvatlash uchun python-docx o'rnatilishi kerak:\n"
+                    "pip install python-docx"
+                )
+                os.remove(temp_file_path)
+                await state.clear()
+                return
+        
+        # Parse lines
+        valid_count = 0
+        error_count = 0
+        errors = []
+        
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Parse format: turkish - uzbek
+            if " - " in line:
+                parts = line.split(" - ", 1)
+                if len(parts) == 2:
+                    turkish = parts[0].strip()
+                    uzbek = parts[1].strip()
+                    if turkish and uzbek:
+                        words_parsed.append((turkish, uzbek))
+                        valid_count += 1
+                    else:
+                        error_count += 1
+                        errors.append(f"Qator {line_num}: bo'sh so'z")
+                else:
+                    error_count += 1
+                    errors.append(f"Qator {line_num}: noto'g'ri format")
+            else:
+                error_count += 1
+                errors.append(f"Qator {line_num}: '-' ajratuvchi topilmadi")
+        
+        # Clean up temp file
+        os.remove(temp_file_path)
+        
+        if not words_parsed:
+            await message.answer(
+                "❌ Hech qanday to'g'ri so'z topilmadi.\n\n"
+                "Format: <code>turkish_word - uzbek_translation</code>\n"
+                "Masalan: <code>merhaba - salom</code>"
+            )
+            await state.clear()
+            return
+        
+        # Save to database
+        async for session in get_session():
+            # Create word list
+            word_list = WordList(
+                name=f"{cefr_level}_words_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+                cefr_level=cefr_level,
+                owner_id=user.id,
+            )
+            session.add(word_list)
+            await session.flush()
+            
+            # Add words
+            words_to_add = []
+            for turkish, uzbek in words_parsed:
+                word = Word(
+                    turkish=turkish,
+                    uzbek=uzbek,
+                    word_list_id=word_list.id,
+                )
+                words_to_add.append(word)
+            
+            session.add_all(words_to_add)
+            await session.commit()
+        
+        # Success message
+        success_msg = (
+            f"✅ So'zlar muvaffaqiyatli yuklandi!\n\n"
+            f"CEFR daraja: <b>{cefr_level}</b>\n"
+            f"To'g'ri so'zlar: <b>{valid_count}</b>\n"
+        )
+        
+        if error_count > 0:
+            success_msg += f"Xatoliklar: <b>{error_count}</b>\n"
+            if len(errors) <= 5:
+                success_msg += "\nXatoliklar:\n" + "\n".join(errors[:5])
+            else:
+                success_msg += f"\nBirinchi 5 ta xatolik:\n" + "\n".join(errors[:5])
+        
+        await message.answer(success_msg)
+        await state.clear()
+        
+    except Exception as e:
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
+        await state.clear()
 
 
 async def main() -> None:

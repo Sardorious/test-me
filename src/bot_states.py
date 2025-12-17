@@ -20,3 +20,8 @@ class AdminStates(StatesGroup):
     waiting_teacher_username = State()
 
 
+class UploadWordsStates(StatesGroup):
+    choosing_level = State()
+    waiting_file = State()
+
+

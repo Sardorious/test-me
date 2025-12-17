@@ -254,6 +254,35 @@ python3 -m src.migrate_db
 python3 -m src.main
 ```
 
+#### Stop/Kill the Bot Process
+
+**Windows (PowerShell):**
+```powershell
+# Find Python processes
+Get-Process python | Where-Object {$_.Path -like "*python*"}
+
+# Kill specific process by ID
+Stop-Process -Id <process_id> -Force
+
+# Kill all Python processes (be careful!)
+Get-Process python | Stop-Process -Force
+```
+
+**Linux/Debian:**
+```bash
+# Find the bot process
+ps aux | grep "python3 -m src.main" | grep -v grep
+
+# Kill by process ID
+kill <process_id>
+
+# Or kill all Python processes (be careful!)
+pkill -f "python3 -m src.main"
+
+# Force kill if needed
+kill -9 <process_id>
+```
+
 #### Rebuild Dependencies Only
 
 If you just need to reinstall Python packages:
