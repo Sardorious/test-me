@@ -88,13 +88,29 @@ async def get_or_create_user(tg_user, role_hint=None) -> User:
     async for session in get_session():
         stmt = select(User).where(User.telegram_id == tg_user.id)
         user = await session.scalar(stmt)
+        
+        # Check if user is in ADMIN_IDS (should be Teacher)
+        should_be_teacher = tg_user.id in settings.admin_ids
+        
         if user:
+            # Update existing user if they're in ADMIN_IDS but not marked as teacher
+            if should_be_teacher and not user.is_teacher:
+                user.is_teacher = True
+                user.is_student = True  # Ensure they're also a student
+                user.is_registered = True  # Teachers are auto-registered
+                await session.commit()
+                await session.refresh(user)
+            # Update username and full_name if changed
+            if tg_user.username != user.username or tg_user.full_name != user.full_name:
+                user.username = tg_user.username
+                user.full_name = tg_user.full_name
+                await session.commit()
             return user  # type: ignore[return-value]
 
         # Set roles: every new user is a student
         # If chat ID is in ADMIN_IDS, they also become a teacher
         is_admin = False  # No longer using admin_ids for admin role
-        is_teacher = tg_user.id in settings.admin_ids  # ADMIN_IDS now means Teacher
+        is_teacher = should_be_teacher  # ADMIN_IDS now means Teacher
         is_student = True  # All users are students by default
         
         # Note: role_hint is deprecated but kept for backward compatibility
@@ -366,8 +382,25 @@ async def reg_choose_direction(callback: CallbackQuery, state: FSMContext) -> No
         return
     
     # Save registration data
-    user = await get_or_create_user(callback.from_user)
     async for session in get_session():
+        # Get user in this session
+        stmt = select(User).where(User.telegram_id == callback.from_user.id)
+        user = await session.scalar(stmt)
+        
+        if not user:
+            # Create user if doesn't exist
+            user = User(
+                telegram_id=callback.from_user.id,
+                username=callback.from_user.username,
+                full_name=callback.from_user.full_name,
+                is_admin=False,
+                is_teacher=callback.from_user.id in settings.admin_ids,
+                is_student=True,
+                is_registered=True,
+            )
+            session.add(user)
+        
+        # Update registration data
         user.first_name = first_name
         user.last_name = last_name
         user.phone_number = phone_number
