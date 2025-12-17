@@ -713,14 +713,22 @@ async def _finish_test_and_show_result(
 
         await state.clear()
 
+        # Get incorrect answers for student
+        incorrect_questions = [q for q in questions if not q.is_correct and q.student_answer]
+        incorrect_count = len(incorrect_questions)
+
         text = (
             f"Test yakunlandi!\n\n"
             f"Umumiy savollar: <b>{total}</b>\n"
-            f"To‘g‘ri javoblar: <b>{correct}</b>\n"
-            f"Javobsiz (yo‘q / bo‘sh): <b>{no_answer}</b>\n"
+            f"To'g'ri javoblar: <b>{correct}</b>\n"
+            f"Javobsiz (yo'q / bo'sh): <b>{no_answer}</b>\n"
             f"Natija: <b>{percent}%</b>"
         )
         await message.answer(text)
+        
+        # Show mistakes to student if there are any
+        if incorrect_count > 0:
+            await _show_mistakes_to_student(message, test_session_id, incorrect_questions)
 
 
 # ========== TEACHER/ADMIN COMMANDS ==========
@@ -914,7 +922,7 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
 
 # ========== VIEW MISTAKES HANDLERS ==========
 
-@dp.message(Command("view_mistakes"))
+@dp.message(F.text.startswith("/view_mistakes_"))
 async def cmd_view_mistakes(message: Message, state: FSMContext) -> None:
     """View mistakes for a specific test session."""
     user = await get_or_create_user(message.from_user)
@@ -924,8 +932,8 @@ async def cmd_view_mistakes(message: Message, state: FSMContext) -> None:
         return
     
     # Parse command: /view_mistakes_123
-    command_parts = message.text.split("_")
-    if len(command_parts) < 3:
+    text = message.text or ""
+    if not text.startswith("/view_mistakes_"):
         await message.answer(
             "Noto'g'ri format. Quyidagicha ishlating:\n"
             "/view_results - natijalarni ko'ring va xatolarni ko'rish tugmasini bosing"
@@ -933,12 +941,81 @@ async def cmd_view_mistakes(message: Message, state: FSMContext) -> None:
         return
     
     try:
-        session_id = int(command_parts[2])
+        # Extract session ID from /view_mistakes_123
+        session_id_str = text.replace("/view_mistakes_", "").strip()
+        session_id = int(session_id_str)
     except ValueError:
         await message.answer("Noto'g'ri test ID.")
         return
     
     await _show_mistakes(message, session_id)
+
+
+async def _show_mistakes_to_student(
+    message: Message, session_id: int, incorrect_questions: list
+) -> None:
+    """Show incorrect answers to student at the end of test."""
+    async for session in get_session():
+        test_session = await session.get(TestSession, session_id)
+        if not test_session:
+            return
+        
+        # Get words for display
+        word_ids = [q.word_id for q in incorrect_questions]
+        words_stmt = select(Word).where(Word.id.in_(word_ids))
+        words_result = await session.scalars(words_stmt)
+        words_dict = {w.id: w for w in words_result.all()}
+        
+        direction_text = "TR➜UZ" if test_session.direction == TestDirection.TR_TO_UZ else "UZ➜TR"
+        
+        text_parts = [
+            f"❌ <b>Xatolaringiz:</b>\n",
+            f"🎓 {test_session.cefr_level} | {direction_text}\n",
+            f"Xatolar soni: <b>{len(incorrect_questions)}</b>\n",
+            f"{'=' * 25}\n"
+        ]
+        
+        for q in incorrect_questions:
+            word = words_dict.get(q.word_id)
+            if not word:
+                continue
+            
+            # Show the question word
+            if q.shown_lang == "tr":
+                question_word = word.turkish
+                answer_lang = "Uzbek"
+            else:
+                question_word = word.uzbek
+                answer_lang = "Turkish"
+            
+            student_answer = q.student_answer or "(javob yo'q)"
+            correct_answer = q.correct_answer
+            
+            text_parts.append(
+                f"\n❓ <b>{question_word}</b> ({answer_lang})\n"
+                f"❌ Sizning javobingiz: <code>{student_answer}</code>\n"
+                f"✅ To'g'ri javob: <code>{correct_answer}</code>\n"
+                f"{'─' * 20}"
+            )
+        
+        # Send in chunks if too long
+        full_text = "\n".join(text_parts)
+        if len(full_text) > 4000:
+            # Send header first
+            await message.answer(text_parts[0] + text_parts[1] + text_parts[2] + text_parts[3])
+            
+            # Send mistakes in chunks
+            chunk = ""
+            for part in text_parts[4:]:
+                if len(chunk + part) > 4000:
+                    await message.answer(chunk)
+                    chunk = part
+                else:
+                    chunk += part
+            if chunk:
+                await message.answer(chunk)
+        else:
+            await message.answer(full_text)
 
 
 async def _show_mistakes(message: Message, session_id: int) -> None:
