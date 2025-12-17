@@ -1046,7 +1046,7 @@ async def _show_mistakes_to_student(
 
 
 async def _show_mistakes(message: Message, session_id: int) -> None:
-    """Show incorrect answers for a test session."""
+    """Show incorrect answers for a test session with ability to mark as correct."""
     async for session in get_session():
         # Get test session
         test_session = await session.get(TestSession, session_id)
@@ -1083,21 +1083,25 @@ async def _show_mistakes(message: Message, session_id: int) -> None:
         words_result = await session.scalars(words_stmt)
         words_dict = {w.id: w for w in words_result.all()}
         
-        # Format mistakes
+        # Format mistakes with inline buttons
         student_name = f"{student.first_name or ''} {student.last_name or ''}".strip()
         if not student_name:
             student_name = student.full_name or f"ID: {student.telegram_id}"
         
         direction_text = "TR➜UZ" if test_session.direction == TestDirection.TR_TO_UZ else "UZ➜TR"
         
-        text_parts = [
-            f"❌ <b>{student_name} - Xatolar</b>\n",
-            f"📅 {test_session.finished_at.strftime('%Y-%m-%d %H:%M') if test_session.finished_at else 'N/A'}\n",
-            f"🎓 {test_session.cefr_level} | {direction_text}\n",
-            f"Xatolar soni: <b>{len(incorrect_questions)}</b>\n",
+        # Send mistakes one by one with buttons (Telegram limit for inline keyboards)
+        header_text = (
+            f"❌ <b>{student_name} - Xatolar</b>\n"
+            f"📅 {test_session.finished_at.strftime('%Y-%m-%d %H:%M') if test_session.finished_at else 'N/A'}\n"
+            f"🎓 {test_session.cefr_level} | {direction_text}\n"
+            f"Xatolar soni: <b>{len(incorrect_questions)}</b>\n"
             f"{'=' * 25}\n"
-        ]
+            f"\nO'qituvchi: Agar javob sinonim yoki to'g'ri bo'lsa, 'To'g'ri deb belgilash' tugmasini bosing."
+        )
+        await message.answer(header_text)
         
+        # Send each mistake with a button to mark as correct
         for q in incorrect_questions:
             word = words_dict.get(q.word_id)
             if not word:
@@ -1114,31 +1118,92 @@ async def _show_mistakes(message: Message, session_id: int) -> None:
             student_answer = q.student_answer or "(javob yo'q)"
             correct_answer = q.correct_answer
             
-            text_parts.append(
+            mistake_text = (
                 f"\n❓ <b>{question_word}</b> ({answer_lang})\n"
-                f"❌ Sizning javobingiz: <code>{student_answer}</code>\n"
-                f"✅ To'g'ri javob: <code>{correct_answer}</code>\n"
+                f"❌ O'quvchi javobi: <code>{student_answer}</code>\n"
+                f"✅ Kutilgan javob: <code>{correct_answer}</code>\n"
                 f"{'─' * 20}"
             )
-        
-        # Send in chunks if too long
-        full_text = "\n".join(text_parts)
-        if len(full_text) > 4000:
-            # Send header first
-            await message.answer(text_parts[0] + text_parts[1] + text_parts[2] + text_parts[3] + text_parts[4])
             
-            # Send mistakes in chunks
-            chunk = ""
-            for part in text_parts[5:]:
-                if len(chunk + part) > 4000:
-                    await message.answer(chunk)
-                    chunk = part
-                else:
-                    chunk += part
-            if chunk:
-                await message.answer(chunk)
+            # Add inline button to mark as correct
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="✅ To'g'ri deb belgilash",
+                        callback_data=f"mark_correct:{q.id}"
+                    )
+                ]]
+            )
+            
+            await message.answer(mistake_text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("mark_correct:"))
+async def handle_mark_correct(callback: CallbackQuery) -> None:
+    """Mark a student answer as correct (for synonyms or alternative correct answers)."""
+    user = await get_or_create_user(callback.from_user)
+    
+    if not has_teacher_or_admin_permission(user):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    
+    # Parse question ID
+    try:
+        question_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Xatolik: noto'g'ri format.", show_alert=True)
+        return
+    
+    async for session in get_session():
+        # Get question
+        question = await session.get(TestQuestion, question_id)
+        if not question:
+            await callback.answer("Savol topilmadi.", show_alert=True)
+            return
+        
+        # Check if already correct
+        if question.is_correct:
+            await callback.answer("Bu javob allaqachon to'g'ri deb belgilangan.", show_alert=True)
+            return
+        
+        # Mark as correct
+        question.is_correct = True
+        await session.commit()
+        
+        # Get test session to update stats
+        test_session = await session.get(TestSession, question.test_session_id)
+        if test_session:
+            # Recalculate stats (optional - for consistency)
+            questions_stmt = select(TestQuestion).where(
+                TestQuestion.test_session_id == test_session.id
+            )
+            all_questions = await session.scalars(questions_stmt)
+            correct_count = sum(1 for q in all_questions.all() if q.is_correct)
+            # Note: We don't update test_session here, but the stats will be recalculated when viewing results
+        
+        # Get word for display
+        word = await session.get(Word, question.word_id)
+        if word:
+            if question.shown_lang == "tr":
+                question_word = word.turkish
+            else:
+                question_word = word.uzbek
+            
+            await callback.message.edit_text(
+                f"✅ <b>Javob to'g'ri deb belgilandi!</b>\n\n"
+                f"❓ {question_word}\n"
+                f"O'quvchi javobi: <code>{question.student_answer}</code>\n"
+                f"Kutilgan javob: <code>{question.correct_answer}</code>\n\n"
+                f"Bu javob endi to'g'ri deb hisoblanadi."
+            )
         else:
-            await message.answer(full_text)
+            await callback.message.edit_text(
+                f"✅ <b>Javob to'g'ri deb belgilandi!</b>\n\n"
+                f"O'quvchi javobi: <code>{question.student_answer}</code>\n"
+                f"Bu javob endi to'g'ri deb hisoblanadi."
+            )
+        
+        await callback.answer("✅ Javob to'g'ri deb belgilandi!")
 
 
 # ========== ADMIN COMMANDS ==========
