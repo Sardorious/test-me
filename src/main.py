@@ -848,7 +848,7 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
             if filter_degree and filter_degree != "all":
                 query = query.where(TestSession.cefr_level == filter_degree)
             
-            query = query.order_by(TestSession.finished_at.desc()).limit(100)
+            query = query.order_by(TestSession.finished_at.desc())
             
             results = await session.execute(query)
             rows = results.all()
@@ -861,14 +861,34 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer()
                 return
             
-            # Format results
+            # Group results by user
+            from collections import defaultdict
+            user_sessions = defaultdict(list)
+            for test_session, student in rows:
+                user_sessions[student.id].append((test_session, student))
+            
+            # Format results - grouped by user
             text_parts = ["📊 <b>O'quvchilar natijalari:</b>\n"]
             
-            for test_session, student in rows:
-                # Calculate stats
+            for student_id, sessions_list in user_sessions.items():
+                # Sort by finished_at descending (most recent first)
+                # Handle None finished_at by using a very old date
+                min_date = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                sessions_list.sort(key=lambda x: x[0].finished_at or min_date, reverse=True)
+                
+                # Get student info from first session
+                student = sessions_list[0][1]
+                student_name = f"{student.first_name or ''} {student.last_name or ''}".strip()
+                if not student_name:
+                    student_name = student.full_name or f"ID: {student.telegram_id}"
+                
+                # Show last test in detail
+                last_session, _ = sessions_list[0]
+                
+                # Calculate stats for last test
                 questions_query = (
                     select(TestQuestion)
-                    .where(TestQuestion.test_session_id == test_session.id)
+                    .where(TestQuestion.test_session_id == last_session.id)
                 )
                 questions_result = await session.execute(questions_query)
                 questions = questions_result.scalars().all()
@@ -877,26 +897,29 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
                 correct = sum(1 for q in questions if q.is_correct)
                 percent = int((correct / total) * 100) if total else 0
                 
-                student_name = f"{student.first_name or ''} {student.last_name or ''}".strip()
-                if not student_name:
-                    student_name = student.full_name or f"ID: {student.telegram_id}"
-                
-                direction_text = "TR➜UZ" if test_session.direction == TestDirection.TR_TO_UZ else "UZ➜TR"
-                finished_date = test_session.finished_at.strftime("%Y-%m-%d %H:%M") if test_session.finished_at else "N/A"
-                
+                direction_text = "TR➜UZ" if last_session.direction == TestDirection.TR_TO_UZ else "UZ➜TR"
+                finished_date = last_session.finished_at.strftime("%Y-%m-%d %H:%M") if last_session.finished_at else "N/A"
                 incorrect_count = total - correct
                 
                 text_parts.append(
                     f"\n👤 <b>{student_name}</b>\n"
                     f"📅 {finished_date}\n"
-                    f"🎓 {test_session.cefr_level} | {direction_text}\n"
+                    f"🎓 {last_session.cefr_level} | {direction_text}\n"
                     f"✅ {correct}/{total} ({percent}%)\n"
                     f"❌ Xatolar: {incorrect_count}"
                 )
                 
                 # Add button to view mistakes if there are any
                 if incorrect_count > 0:
-                    text_parts[-1] += f"\n🔍 Xatolarni ko'rish: /view_mistakes_{test_session.id}"
+                    text_parts[-1] += f"\n🔍 Xatolarni ko'rish: /view_mistakes_{last_session.id}"
+                
+                # Show other 5 tests as numbers (if more than 1 test)
+                if len(sessions_list) > 1:
+                    other_tests = sessions_list[1:6]  # Next 5 tests
+                    test_ids = [str(test_sess.id) for test_sess, _ in other_tests]
+                    
+                    if test_ids:
+                        text_parts.append(f"\n📋 Boshqa testlar: {', '.join(test_ids)}")
                 
                 text_parts.append(f"{'─' * 20}")
             
