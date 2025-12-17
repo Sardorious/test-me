@@ -1774,7 +1774,7 @@ async def delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
 
 
-@dp.callback_query(DeleteWordsStates, F.data == "delete_cancel")
+@dp.callback_query(DeleteWordsStates.confirming_delete, F.data == "delete_cancel")
 async def delete_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text("❌ O'chirish bekor qilindi.")
     await callback.answer()

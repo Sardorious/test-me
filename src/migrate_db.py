@@ -129,10 +129,28 @@ async def add_missing_columns() -> None:
                         is_student = (role::text = 'student')
                 """))
                 
+                # Make role column nullable so new inserts don't require it
+                print("Making role column nullable...")
+                try:
+                    await conn.execute(text("ALTER TABLE users ALTER COLUMN role DROP NOT NULL"))
+                    print("✅ Made role column nullable")
+                except Exception as e:
+                    print(f"⚠️  Could not make role column nullable: {e}")
+                    print("   You may need to manually alter the column or drop it.")
+                
                 print("✅ Migrated role column to boolean flags")
-                print("⚠️  Note: Old 'role' column still exists. You can drop it manually if needed.")
+                print("⚠️  Note: Old 'role' column still exists but is now nullable. You can drop it manually if needed.")
             elif 'is_admin' in existing_columns:
                 print("✅ Role columns already migrated")
+                # Check if role column is still NOT NULL and make it nullable
+                if 'role' in existing_columns:
+                    print("Checking if role column needs to be made nullable...")
+                    try:
+                        await conn.execute(text("ALTER TABLE users ALTER COLUMN role DROP NOT NULL"))
+                        print("✅ Made role column nullable")
+                    except Exception as e:
+                        # Column might already be nullable or error occurred
+                        print(f"   Role column status check: {str(e)[:100]}")
         
         elif "sqlite" in settings.db_url.lower():
             # SQLite: Check columns
