@@ -52,7 +52,7 @@ class User(Base):
         Enum(TestDirection, name="preferred_direction"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
     test_sessions: Mapped[list["TestSession"]] = relationship(
@@ -73,7 +73,7 @@ class WordList(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
     words: Mapped[list["Word"]] = relationship(
@@ -118,9 +118,9 @@ class TestSession(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     student: Mapped[User] = relationship(back_populates="test_sessions")
     questions: Mapped[list["TestQuestion"]] = relationship(
