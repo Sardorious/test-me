@@ -63,10 +63,14 @@ def compare_answers(student_answer: str, correct_answer: str) -> bool:
     """
     Compare student answer with correct answer in a case-insensitive manner.
     Both answers are normalized (lowercased, trimmed) before comparison.
+    Case (big/small letters) does not affect the result.
     """
     if not student_answer:
         return False
-    return normalize_answer(student_answer) == normalize_answer(correct_answer)
+    # Normalize both answers to lowercase for case-insensitive comparison
+    student_normalized = normalize_answer(student_answer)
+    correct_normalized = normalize_answer(correct_answer)
+    return student_normalized == correct_normalized
 
 
 def has_teacher_or_admin_permission(user: User) -> bool:
