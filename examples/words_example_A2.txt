@@ -1,0 +1,49 @@
+günlük - kunlik
+hafta - hafta
+ay - oy
+yıl - yil
+bugün - bugun
+dün - kecha
+yarın - ertaga
+sabah - ertalab
+öğleden sonra - tushdan keyin
+akşam - kechqurun
+gece - tun
+zaman - vaqt
+saat - soat
+dakika - daqiqa
+saniye - soniya
+hava - ob-havo
+güneşli - quyoshli
+yağmurlu - yomg'irli
+kar - qor
+rüzgarlı - shamolli
+sıcak - issiq
+soğuk - sovuq
+ılık - iliq
+giymek - kiyinmoq
+elbise - ko'ylak
+pantolon - shim
+ayakkabı - poyabzal
+şapka - qalpoq
+çanta - sumka
+yemek - ovqat
+kahvaltı - nonushta
+öğle yemeği - tushlik
+akşam yemeği - kechki ovqat
+içmek - ichmoq
+yemek yemek - ovqat yemoq
+aç - och
+tok - to'q
+susamak - chanqamoq
+içmek - ichmoq
+su içmek - suv ichmoq
+çay - choy
+kahve - qahva
+süt - sut
+meyve - meva
+sebze - sabzavot
+et - go'sht
+balık - baliq
+tavuk - tovuq
+

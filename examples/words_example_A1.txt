@@ -1,0 +1,40 @@
+merhaba - salom
+teşekkür ederim - rahmat
+lütfen - iltimos
+evet - ha
+hayır - yo'q
+günaydın - xayrli tong
+iyi akşamlar - xayrli kech
+hoş geldiniz - xush kelibsiz
+güle güle - xayr
+nasılsınız - qandaysiz
+iyiyim - yaxshiman
+adınız ne - ismingiz nima
+benim adım - mening ismim
+nerede - qayerda
+burada - bu yerda
+orada - u yerda
+ne - nima
+kim - kim
+kaç - necha
+bir - bir
+iki - ikki
+üç - uch
+dört - to'rt
+beş - besh
+altı - olti
+yedi - yetti
+sekiz - sakkiz
+dokuz - to'qqiz
+on - o'n
+ev - uy
+okul - maktab
+masa - stol
+sandalye - stul
+kitap - kitob
+kalem - qalam
+su - suv
+ekmek - non
+elma - olma
+portakal - apelsin
+

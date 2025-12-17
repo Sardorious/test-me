@@ -1,0 +1,57 @@
+çalışmak - ishlamoq
+iş - ish
+ofis - ofis
+toplantı - yig'ilish
+proje - loyiha
+görev - vazifa
+başarılı - muvaffaqiyatli
+başarısız - muvaffaqiyatsiz
+deneyim - tajriba
+beceri - ko'nikma
+öğrenmek - o'rganmoq
+öğretmek - o'qitmoq
+anlamak - tushunmoq
+anlamak - anglamoq
+açıklamak - tushuntirmoq
+sormak - so'ramoq
+cevap vermek - javob bermoq
+tartışmak - muhokama qilmoq
+fikir - fikr
+düşünce - o'ylash
+karar vermek - qaror qilmoq
+seçmek - tanlamoq
+tercih etmek - afzal ko'rmoq
+beğenmek - yoqtirmoq
+sevmemek - yoqtirmaslik
+ilginç - qiziqarli
+sıkıcı - zerikarli
+zor - qiyin
+kolay - oson
+önemli - muhim
+gerekli - zarur
+mümkün - mumkin
+imkansız - imkonsiz
+şans - omad
+fırsat - imkoniyat
+planlamak - rejalashtirmoq
+hazırlamak - tayyorlamoq
+organize etmek - tashkil qilmoq
+yönetmek - boshqarmoq
+liderlik - rahbarlik
+takım - jamoa
+ekip - jamoaviy
+işbirliği - hamkorlik
+iletişim - aloqa
+toplantı yapmak - yig'ilish o'tkazmoq
+sunum - taqdimot
+rapor - hisobot
+belge - hujjat
+dosya - fayl
+bilgisayar - kompyuter
+internet - internet
+e-posta - elektron pochta
+mesaj - xabar
+aramak - qo'ng'iroq qilmoq
+telefon - telefon
+cep telefonu - mobil telefon
+

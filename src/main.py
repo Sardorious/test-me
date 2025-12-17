@@ -47,9 +47,8 @@ CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
 
 async def get_or_create_user(tg_user, role_hint: UserRole | None = None) -> User:
     async for session in get_session():
-        user = await session.scalar(
-            User.select().where(User.telegram_id == tg_user.id)  # type: ignore[attr-defined]
-        )
+        stmt = select(User).where(User.telegram_id == tg_user.id)
+        user = await session.scalar(stmt)
         if user:
             return user  # type: ignore[return-value]
 
@@ -337,14 +336,12 @@ async def _create_test_session_for_user(
     async for session in get_session():
         # Select all words for this level
         stmt = (
-            WordList.select()
-            .where(WordList.cefr_level == level)  # type: ignore[attr-defined]
-            .join(Word)
+            select(Word)
+            .join(WordList)
+            .where(WordList.cefr_level == level)
         )
-        word_lists = (await session.scalars(stmt)).all()
-        words: list[Word] = []
-        for wl in word_lists:
-            words.extend(wl.words)
+        words_result = await session.scalars(stmt)
+        words = list(words_result.all())
 
         if not words:
             return None
@@ -427,12 +424,11 @@ async def _send_question(message: Message, state: FSMContext) -> None:
         return
 
     async for session in get_session():
-        q = await session.scalar(
-            TestQuestion.select().where(  # type: ignore[attr-defined]
-                TestQuestion.test_session_id == test_session_id,
-                TestQuestion.position == current_pos,
-            )
+        stmt = select(TestQuestion).where(
+            TestQuestion.test_session_id == test_session_id,
+            TestQuestion.position == current_pos,
         )
+        q = await session.scalar(stmt)
         if not q:
             # No more questions, show results
             await _finish_test_and_show_result(message, test_session_id, state)
@@ -463,12 +459,11 @@ async def handle_answer(message: Message, state: FSMContext) -> None:
 
     answer_text = (message.text or "").strip()
     async for session in get_session():
-        q = await session.scalar(
-            TestQuestion.select().where(  # type: ignore[attr-defined]
-                TestQuestion.test_session_id == test_session_id,
-                TestQuestion.position == current_pos,
-            )
+        stmt = select(TestQuestion).where(
+            TestQuestion.test_session_id == test_session_id,
+            TestQuestion.position == current_pos,
         )
+        q = await session.scalar(stmt)
         if not q:
             await message.answer("Savol topilmadi.")
             return
@@ -497,12 +492,11 @@ async def handle_answer_controls(callback: CallbackQuery, state: FSMContext) -> 
         return
 
     async for session in get_session():
-        q = await session.scalar(
-            TestQuestion.select().where(  # type: ignore[attr-defined]
-                TestQuestion.test_session_id == test_session_id,
-                TestQuestion.position == current_pos,
-            )
+        stmt = select(TestQuestion).where(
+            TestQuestion.test_session_id == test_session_id,
+            TestQuestion.position == current_pos,
         )
+        q = await session.scalar(stmt)
         if not q:
             await callback.answer("Savol topilmadi.", show_alert=True)
             return
@@ -542,15 +536,12 @@ async def _finish_test_and_show_result(
             return
 
         # If there are skipped questions not answered, re-ask them:
-        skipped_not_answered = (
-            await session.scalars(
-                TestQuestion.select().where(  # type: ignore[attr-defined]
-                    TestQuestion.test_session_id == test_session_id,
-                    TestQuestion.skipped.is_(True),
-                    TestQuestion.student_answer.is_(None),
-                )
-            )
-        ).all()
+        skipped_stmt = select(TestQuestion).where(
+            TestQuestion.test_session_id == test_session_id,
+            TestQuestion.skipped.is_(True),
+            TestQuestion.student_answer.is_(None),
+        )
+        skipped_not_answered = (await session.scalars(skipped_stmt)).all()
 
         if skipped_not_answered:
             # Move to the first skipped question
@@ -563,13 +554,10 @@ async def _finish_test_and_show_result(
             return
 
         # All questions are either answered or explicitly no-answer
-        questions = (
-            await session.scalars(
-                TestQuestion.select().where(  # type: ignore[attr-defined]
-                    TestQuestion.test_session_id == test_session_id
-                )
-            )
-        ).all()
+        questions_stmt = select(TestQuestion).where(
+            TestQuestion.test_session_id == test_session_id
+        )
+        questions = (await session.scalars(questions_stmt)).all()
 
         correct = sum(1 for q in questions if q.is_correct)
         total = len(questions)

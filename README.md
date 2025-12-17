@@ -172,6 +172,30 @@ To configure `ADMIN_IDS` in your `.env` file, you need to know your Telegram use
 - For multiple admins, separate IDs with commas: `ADMIN_IDS=123456789,987654321,111222333`
 - Make sure to add your ID to `.env` before running the bot if you want admin privileges
 
+### Word Upload Format
+
+Teachers and admins can upload word lists in `.txt` or `.docx` format.
+
+#### Format Rules:
+- Each line: `turkish_word - uzbek_translation`
+- Use a dash (`-`) with spaces to separate words
+- One word pair per line
+- Example: `merhaba - salom`
+
+#### Example Files:
+See the `examples/` directory for sample word files:
+- `words_example_A1.txt` - Beginner level (A1) example
+- `words_example_A2.txt` - Elementary level (A2) example  
+- `words_example_B1.txt` - Intermediate level (B1) example
+- `README_WORD_FORMAT.md` - Detailed format guide
+
+#### Upload Process:
+1. Prepare your word file following the format: `turkish - uzbek`
+2. Use `/upload_words` command in the bot
+3. Select CEFR level (A1, A2, B1, B2, C1, C2)
+4. Upload your `.txt` or `.docx` file
+5. Bot will parse and save all valid word pairs
+
 ### Rebuilding the Project
 
 #### Complete Rebuild (Fresh Start)
