@@ -91,10 +91,11 @@ async def get_or_create_user(tg_user, role_hint=None) -> User:
         if user:
             return user  # type: ignore[return-value]
 
-        # Set roles based on admin_ids or role_hint
-        is_admin = tg_user.id in settings.admin_ids
-        is_teacher = False
-        is_student = True  # Default to student
+        # Set roles: every new user is a student
+        # If chat ID is in ADMIN_IDS, they also become a teacher
+        is_admin = False  # No longer using admin_ids for admin role
+        is_teacher = tg_user.id in settings.admin_ids  # ADMIN_IDS now means Teacher
+        is_student = True  # All users are students by default
         
         # Note: role_hint is deprecated but kept for backward compatibility
         # New code should set is_admin, is_teacher, is_student directly
@@ -106,7 +107,7 @@ async def get_or_create_user(tg_user, role_hint=None) -> User:
             is_admin=is_admin,
             is_teacher=is_teacher,
             is_student=is_student,
-            is_registered=(is_admin or is_teacher),  # Admin/Teacher auto-registered
+            is_registered=is_teacher,  # Teachers are auto-registered
         )
         session.add(user)
         await session.commit()
