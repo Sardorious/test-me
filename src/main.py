@@ -187,10 +187,12 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     # Admin/Teacher or already registered student
     if user.role == UserRole.ADMIN:
         text = (
-            "Salom, Admin! Bot boshqaruv buyruqlari:\n"
+            "Salom, Admin! Bot boshqaruv buyruqlari:\n\n"
+            "<b>O'qituvchi buyruqlari:</b>\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
-            "/delete_words - So'zlar ro'yxatini o'chirish\n"
+            "/delete_words - So'zlar ro'yxatini o'chirish\n\n"
+            "<b>Admin buyruqlari:</b>\n"
             "/add_teacher - O'qituvchi qo'shish\n"
             "/manage_users - Foydalanuvchilarni boshqarish"
         )
@@ -198,7 +200,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         text = (
             "Salom, O'qituvchi! Bot buyruqlari:\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
-            "/upload_words - So'zlar yuklash"
+            "/upload_words - So'zlar yuklash\n"
+            "/delete_words - So'zlar ro'yxatini o'chirish"
         )
     else:
         text = (
@@ -1592,7 +1595,7 @@ async def delete_choose_level(callback: CallbackQuery, state: FSMContext) -> Non
     
     # Get word lists for this level
     async for session in get_session():
-        # If user is teacher, only show their own word lists
+        # If user is teacher (not admin), only show their own word lists
         # If user is admin, show all word lists
         if user.role == UserRole.TEACHER:
             stmt = select(WordList).where(
@@ -1693,7 +1696,7 @@ async def delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             await state.clear()
             return
         
-        # Check permissions again
+        # Check permissions again: teachers can only delete their own, admins can delete any
         if user.role == UserRole.TEACHER and wordlist.owner_id != user.id:
             await callback.answer("Ruxsat yo'q.", show_alert=True)
             await state.clear()
