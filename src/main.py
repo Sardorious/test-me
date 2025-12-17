@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from sqlalchemy import and_, func, select
 
-from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates
+from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates, DeleteWordsStates
 from .config import settings
 from .db import get_session, init_db
 from .models import (
@@ -44,6 +44,16 @@ dp = Dispatcher()
 
 
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
+
+
+def has_teacher_or_admin_permission(user: User) -> bool:
+    """Check if user has teacher or admin permissions (admins have all teacher permissions)."""
+    return user.role in [UserRole.TEACHER, UserRole.ADMIN]
+
+
+def has_admin_permission(user: User) -> bool:
+    """Check if user has admin permission."""
+    return user.role == UserRole.ADMIN
 
 
 async def get_or_create_user(tg_user, role_hint: UserRole | None = None) -> User:
@@ -150,6 +160,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         text = (
             "Salom, Admin! Bot boshqaruv buyruqlari:\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
+            "/upload_words - So'zlar yuklash\n"
+            "/delete_words - So'zlar ro'yxatini o'chirish\n"
             "/add_teacher - O'qituvchi qo'shish"
         )
     elif user.role == UserRole.TEACHER:
@@ -626,7 +638,7 @@ def build_filter_keyboard() -> InlineKeyboardMarkup:
 async def cmd_view_results(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(message.from_user)
     
-    if user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
+    if not has_teacher_or_admin_permission(user):
         await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
         return
     
@@ -642,7 +654,7 @@ async def cmd_view_results(message: Message, state: FSMContext) -> None:
 async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
     user = await get_or_create_user(callback.from_user)
     
-    if user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
+    if not has_teacher_or_admin_permission(user):
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
     
@@ -770,7 +782,7 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
 async def cmd_add_teacher(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(message.from_user)
     
-    if user.role != UserRole.ADMIN:
+    if not has_admin_permission(user):
         await message.answer("Bu buyruq faqat adminlar uchun.")
         return
     
@@ -914,7 +926,7 @@ async def handle_teacher_identifier(message: Message, state: FSMContext) -> None
 async def cmd_upload_words(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(message.from_user)
     
-    if user.role not in [UserRole.TEACHER, UserRole.ADMIN]:
+    if not has_teacher_or_admin_permission(user):
         await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
         return
     
@@ -1087,6 +1099,180 @@ async def handle_upload_file(message: Message, state: FSMContext) -> None:
     except Exception as e:
         await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
         await state.clear()
+
+
+# ========== DELETE WORDS HANDLERS ==========
+
+def build_wordlist_keyboard(wordlists: list[WordList]) -> InlineKeyboardMarkup:
+    """Build keyboard for selecting word list to delete."""
+    buttons = []
+    for wl in wordlists:
+        word_count = len(wl.words) if wl.words else 0
+        button_text = f"{wl.name} ({word_count} so'z)"
+        buttons.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"delete_wl:{wl.id}"
+            )
+        ])
+    buttons.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="delete_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(Command("delete_words"))
+async def cmd_delete_words(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if not has_teacher_or_admin_permission(user):
+        await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
+        return
+    
+    await state.set_state(DeleteWordsStates.choosing_level)
+    await message.answer(
+        "So'zlar ro'yxatini o'chirish.\n\n"
+        "Qaysi CEFR darajasidagi ro'yxatni o'chirmoqchisiz?",
+        reply_markup=build_levels_keyboard()
+    )
+
+
+@dp.callback_query(DeleteWordsStates.choosing_level, F.data.startswith("level:"))
+async def delete_choose_level(callback: CallbackQuery, state: FSMContext) -> None:
+    level = callback.data.split(":", 1)[1]
+    
+    user = await get_or_create_user(callback.from_user)
+    
+    # Get word lists for this level
+    async for session in get_session():
+        # If user is teacher, only show their own word lists
+        # If user is admin, show all word lists
+        if user.role == UserRole.TEACHER:
+            stmt = select(WordList).where(
+                WordList.cefr_level == level,
+                WordList.owner_id == user.id
+            )
+        else:  # Admin can see all
+            stmt = select(WordList).where(WordList.cefr_level == level)
+        
+        wordlists_result = await session.scalars(stmt)
+        wordlists = list(wordlists_result.all())
+        
+        if not wordlists:
+            await callback.message.edit_text(
+                f"❌ {level} darajasida so'zlar ro'yxati topilmadi."
+            )
+            await callback.answer()
+            await state.clear()
+            return
+        
+        await state.update_data(cefr_level=level)
+        await state.set_state(DeleteWordsStates.choosing_wordlist)
+        
+        text = f"CEFR daraja: <b>{level}</b>\n\nO'chirmoqchi bo'lgan ro'yxatni tanlang:"
+        await callback.message.edit_text(text, reply_markup=build_wordlist_keyboard(wordlists))
+        await callback.answer()
+
+
+@dp.callback_query(DeleteWordsStates.choosing_wordlist, F.data.startswith("delete_wl:"))
+async def delete_choose_wordlist(callback: CallbackQuery, state: FSMContext) -> None:
+    wordlist_id = int(callback.data.split(":", 1)[1])
+    
+    user = await get_or_create_user(callback.from_user)
+    
+    async for session in get_session():
+        stmt = select(WordList).where(WordList.id == wordlist_id)
+        wordlist = await session.scalar(stmt)
+        
+        if not wordlist:
+            await callback.answer("Ro'yxat topilmadi.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Check permissions: teachers can only delete their own, admins can delete any
+        if user.role == UserRole.TEACHER and wordlist.owner_id != user.id:
+            await callback.answer("Siz faqat o'z ro'yxatlaringizni o'chira olasiz.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Get word count
+        words_stmt = select(Word).where(Word.word_list_id == wordlist_id)
+        words_result = await session.scalars(words_stmt)
+        word_count = len(list(words_result.all()))
+        
+        await state.update_data(wordlist_id=wordlist_id)
+        await state.set_state(DeleteWordsStates.confirming_delete)
+        
+        text = (
+            f"⚠️ <b>Ro'yxatni o'chirish</b>\n\n"
+            f"Nomi: <b>{wordlist.name}</b>\n"
+            f"CEFR daraja: <b>{wordlist.cefr_level}</b>\n"
+            f"So'zlar soni: <b>{word_count}</b>\n"
+            f"Yaratilgan: {wordlist.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"Bu ro'yxatni o'chirishni tasdiqlaysizmi?"
+        )
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data="delete_confirm"),
+                    InlineKeyboardButton(text="❌ Yo'q", callback_data="delete_cancel"),
+                ]
+            ]
+        )
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+
+@dp.callback_query(DeleteWordsStates.confirming_delete, F.data == "delete_confirm")
+async def delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    wordlist_id = data.get("wordlist_id")
+    
+    if not wordlist_id:
+        await callback.answer("Xatolik: ro'yxat ID topilmadi.", show_alert=True)
+        await state.clear()
+        return
+    
+    user = await get_or_create_user(callback.from_user)
+    
+    async for session in get_session():
+        stmt = select(WordList).where(WordList.id == wordlist_id)
+        wordlist = await session.scalar(stmt)
+        
+        if not wordlist:
+            await callback.answer("Ro'yxat topilmadi.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Check permissions again
+        if user.role == UserRole.TEACHER and wordlist.owner_id != user.id:
+            await callback.answer("Ruxsat yo'q.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Get word count before deletion
+        words_stmt = select(Word).where(Word.word_list_id == wordlist_id)
+        words_result = await session.scalars(words_stmt)
+        word_count = len(list(words_result.all()))
+        
+        # Delete word list (cascade will delete words)
+        await session.delete(wordlist)
+        await session.commit()
+        
+        await callback.message.edit_text(
+            f"✅ Ro'yxat muvaffaqiyatli o'chirildi!\n\n"
+            f"Nomi: <b>{wordlist.name}</b>\n"
+            f"O'chirilgan so'zlar: <b>{word_count}</b>"
+        )
+        await callback.answer("Ro'yxat o'chirildi.")
+        await state.clear()
+
+
+@dp.callback_query(DeleteWordsStates, F.data == "delete_cancel")
+async def delete_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text("❌ O'chirish bekor qilindi.")
+    await callback.answer()
+    await state.clear()
 
 
 async def main() -> None:

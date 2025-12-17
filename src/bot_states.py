@@ -25,3 +25,9 @@ class UploadWordsStates(StatesGroup):
     waiting_file = State()
 
 
+class DeleteWordsStates(StatesGroup):
+    choosing_level = State()
+    choosing_wordlist = State()
+    confirming_delete = State()
+
+
