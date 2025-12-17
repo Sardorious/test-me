@@ -121,11 +121,12 @@ async def add_missing_columns() -> None:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN is_student BOOLEAN DEFAULT TRUE NOT NULL"))
                 
                 # Migrate data from role enum to boolean flags
+                # Cast enum to text for comparison in PostgreSQL
                 await conn.execute(text("""
                     UPDATE users 
-                    SET is_admin = (role = 'admin'),
-                        is_teacher = (role = 'teacher'),
-                        is_student = (role = 'student')
+                    SET is_admin = (role::text = 'admin'),
+                        is_teacher = (role::text = 'teacher'),
+                        is_student = (role::text = 'student')
                 """))
                 
                 print("✅ Migrated role column to boolean flags")
@@ -154,11 +155,12 @@ async def add_missing_columns() -> None:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN is_student BOOLEAN DEFAULT 1 NOT NULL"))
                 
                 # Migrate data from role enum to boolean flags
+                # Cast enum to text for comparison in PostgreSQL
                 await conn.execute(text("""
                     UPDATE users 
-                    SET is_admin = (role = 'admin'),
-                        is_teacher = (role = 'teacher'),
-                        is_student = (role = 'student')
+                    SET is_admin = (role::text = 'admin'),
+                        is_teacher = (role::text = 'teacher'),
+                        is_student = (role::text = 'student')
                 """))
                 
                 print("✅ Migrated role column to boolean flags")
