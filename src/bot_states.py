@@ -16,3 +16,7 @@ class TestStates(StatesGroup):
     answering = State()
 
 
+class AdminStates(StatesGroup):
+    waiting_teacher_username = State()
+
+

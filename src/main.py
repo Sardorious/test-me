@@ -20,7 +20,7 @@ from aiogram.types import (
 
 from sqlalchemy import and_, func, select
 
-from .bot_states import TestStates, RegistrationStates
+from .bot_states import TestStates, RegistrationStates, AdminStates
 from .config import settings
 from .db import get_session, init_db
 from .models import (
@@ -761,6 +761,150 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
             
             await callback.answer()
             await state.clear()
+
+
+# ========== ADMIN COMMANDS ==========
+
+@dp.message(Command("add_teacher"))
+async def cmd_add_teacher(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if user.role != UserRole.ADMIN:
+        await message.answer("Bu buyruq faqat adminlar uchun.")
+        return
+    
+    # Check if replying to a message (get user from reply)
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        await _add_teacher_by_user(message, target_user)
+        return
+    
+    # Check if forwarding a message (get user from forward)
+    if message.forward_from:
+        await _add_teacher_by_user(message, message.forward_from)
+        return
+    
+    await state.set_state(AdminStates.waiting_teacher_username)
+    await message.answer(
+        "Yangi o'qituvchi qo'shish.\n\n"
+        "<b>Usul 1:</b> O'qituvchining xabariga javob bering va /add_teacher yozing\n"
+        "<b>Usul 2:</b> O'qituvchining xabarini forward qiling va /add_teacher yozing\n"
+        "<b>Usul 3:</b> Username (@username) yoki user ID (123456789) yuboring"
+    )
+
+
+async def _add_teacher_by_user(message: Message, target_user) -> None:
+    """Helper function to add teacher by Telegram user object."""
+    teacher_id = target_user.id
+    
+    async for session in get_session():
+        stmt = select(User).where(User.telegram_id == teacher_id)
+        teacher_user = await session.scalar(stmt)
+        
+        if teacher_user:
+            teacher_user.role = UserRole.TEACHER
+            teacher_user.is_registered = True
+            await session.commit()
+            name = teacher_user.full_name or teacher_user.username or f"ID: {teacher_id}"
+            await message.answer(
+                f"✅ O'qituvchi muvaffaqiyatli qo'shildi!\n\n"
+                f"Foydalanuvchi: <b>{name}</b>\n"
+                f"Username: @{target_user.username or 'yo\'q'}\n"
+                f"User ID: {teacher_id}\n"
+                f"Role: O'qituvchi"
+            )
+        else:
+            # Create new user as teacher
+            new_teacher = User(
+                telegram_id=teacher_id,
+                username=target_user.username,
+                full_name=target_user.full_name,
+                role=UserRole.TEACHER,
+                is_registered=True,
+            )
+            session.add(new_teacher)
+            await session.commit()
+            name = target_user.full_name or target_user.username or f"ID: {teacher_id}"
+            await message.answer(
+                f"✅ Yangi o'qituvchi yaratildi!\n\n"
+                f"Foydalanuvchi: <b>{name}</b>\n"
+                f"Username: @{target_user.username or 'yo\'q'}\n"
+                f"User ID: {teacher_id}\n"
+                f"Role: O'qituvchi"
+            )
+
+
+@dp.message(AdminStates.waiting_teacher_username)
+async def handle_teacher_identifier(message: Message, state: FSMContext) -> None:
+    identifier = message.text.strip() if message.text else ""
+    
+    if not identifier:
+        await message.answer("Iltimos, username yoki user ID kiriting.")
+        return
+    
+    teacher_id: int | None = None
+    
+    # Check if it's a username (starts with @)
+    if identifier.startswith("@"):
+        username = identifier[1:]  # Remove @
+        async for session in get_session():
+            stmt = select(User).where(User.username == username)
+            teacher_user = await session.scalar(stmt)
+            if teacher_user:
+                teacher_id = teacher_user.telegram_id
+            else:
+                await message.answer(
+                    f"Foydalanuvchi '{identifier}' topilmadi.\n"
+                    "Iltimos, botga /start yuborishi kerak."
+                )
+                await state.clear()
+                return
+    else:
+        # Try to parse as user ID
+        try:
+            teacher_id = int(identifier)
+        except ValueError:
+            await message.answer(
+                "Noto'g'ri format. Username (@username) yoki user ID (raqam) kiriting."
+            )
+            return
+    
+    if not teacher_id:
+        await message.answer("Xatolik: foydalanuvchi topilmadi.")
+        await state.clear()
+        return
+    
+    # Update or create user as teacher
+    async for session in get_session():
+        stmt = select(User).where(User.telegram_id == teacher_id)
+        teacher_user = await session.scalar(stmt)
+        
+        if teacher_user:
+            teacher_user.role = UserRole.TEACHER
+            teacher_user.is_registered = True  # Teachers are auto-registered
+            await session.commit()
+            await message.answer(
+                f"✅ O'qituvchi muvaffaqiyatli qo'shildi!\n\n"
+                f"Foydalanuvchi: {teacher_user.full_name or teacher_user.username or f'ID: {teacher_id}'}\n"
+                f"Role: O'qituvchi"
+            )
+        else:
+            # Create new user as teacher
+            new_teacher = User(
+                telegram_id=teacher_id,
+                role=UserRole.TEACHER,
+                is_registered=True,
+            )
+            session.add(new_teacher)
+            await session.commit()
+            await message.answer(
+                f"✅ Yangi o'qituvchi yaratildi!\n\n"
+                f"User ID: {teacher_id}\n"
+                f"Role: O'qituvchi\n\n"
+                f"Foydalanuvchi botga /start yuborishi kerak."
+            )
+    
+    await state.clear()
 
 
 async def main() -> None:
