@@ -3,6 +3,8 @@ from datetime import datetime
 from random import shuffle
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -33,7 +35,10 @@ from .models import (
 )
 
 
-bot = Bot(token=settings.bot_token, parse_mode="HTML")
+bot = Bot(
+    token=settings.bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
 
 
