@@ -64,7 +64,7 @@ This project is a Telegram bot for Turkish–Uzbek vocabulary training with CEFR
    ADMIN_IDS=123456789,987654321
    DB_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/telegram_bot
    ```
-   **Note**: `DB_URL` is optional - defaults to PostgreSQL if not set. See `env.example` for other database options.
+   **Note**: `DB_URL` is optional - defaults to SQLite if not set. See `env.example` for other database options.
 5. **Database setup**:
    - **PostgreSQL**: Create the database first (see Database Configuration section below)
    - Tables are created automatically when the bot starts
@@ -87,7 +87,21 @@ This project is a Telegram bot for Turkish–Uzbek vocabulary training with CEFR
 
 ### Database Configuration
 
-#### PostgreSQL Setup (Default)
+#### SQLite Setup (Default - No Configuration Needed)
+
+SQLite is the default database and requires no setup:
+- Database file (`bot.db`) is created automatically in the project root
+- No server installation or configuration required
+- Perfect for development and small deployments
+
+**Default configuration** (already set):
+```bash
+DB_URL=sqlite+aiosqlite:///./bot.db
+```
+
+#### PostgreSQL Setup (Optional - For Production)
+
+If you want to use PostgreSQL instead:
 
 1. **Install PostgreSQL**:
    ```bash
@@ -119,14 +133,14 @@ This project is a Telegram bot for Turkish–Uzbek vocabulary training with CEFR
 
 #### Database Options
 
-- **PostgreSQL (default)**: `DB_URL=postgresql+asyncpg://user:password@localhost:5432/dbname`
-- **SQLite (alternative)**: `DB_URL=sqlite+aiosqlite:///./bot.db`
+- **SQLite (default)**: `DB_URL=sqlite+aiosqlite:///./bot.db` - No setup required
+- **PostgreSQL (alternative)**: `DB_URL=postgresql+asyncpg://user:password@localhost:5432/dbname`
 - **MySQL (alternative)**: `DB_URL=mysql+aiomysql://user:password@localhost:3306/dbname`
 
 **Notes**:
 - Tables are created automatically when the bot starts
-- If `DB_URL` is not set in `.env`, it defaults to PostgreSQL
-- For SQLite, no database server setup is needed (uses local file)
+- If `DB_URL` is not set in `.env`, it defaults to SQLite
+- SQLite is recommended for getting started quickly
 
 ### Getting Your Telegram Chat ID
 
@@ -157,5 +171,131 @@ To configure `ADMIN_IDS` in your `.env` file, you need to know your Telegram use
 - Your user ID is a numeric value (e.g., `123456789`)
 - For multiple admins, separate IDs with commas: `ADMIN_IDS=123456789,987654321,111222333`
 - Make sure to add your ID to `.env` before running the bot if you want admin privileges
+
+### Rebuilding the Project
+
+#### Complete Rebuild (Fresh Start)
+
+If you want to rebuild everything from scratch:
+
+**Windows:**
+```bash
+# Remove old virtual environment
+rmdir /s venv
+
+# Remove old database (if using SQLite)
+del bot.db
+
+# Create new virtual environment
+python -m venv venv
+.\venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Copy environment file
+copy env.example .env
+# Edit .env with your settings
+
+# Run database migration (if needed)
+python -m src.migrate_db
+
+# Start the bot
+python -m src.main
+```
+
+**Linux/Debian:**
+```bash
+# Remove old virtual environment
+rm -rf venv
+
+# Remove old database (if using SQLite)
+rm -f bot.db
+
+# Create new virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Copy environment file
+cp env.example .env
+# Edit .env with your settings
+
+# Run database migration (if needed)
+python3 -m src.migrate_db
+
+# Start the bot
+python3 -m src.main
+```
+
+#### Rebuild Dependencies Only
+
+If you just need to reinstall Python packages:
+
+```bash
+# Activate virtual environment first
+# Windows: .\venv\Scripts\activate
+# Linux: source venv/bin/activate
+
+# Uninstall all packages
+pip freeze > temp_requirements.txt
+pip uninstall -r temp_requirements.txt -y
+rm temp_requirements.txt  # Linux
+# del temp_requirements.txt  # Windows
+
+# Reinstall from requirements.txt
+pip install -r requirements.txt
+```
+
+#### Rebuild Database Only
+
+**PostgreSQL:**
+```bash
+# Connect to PostgreSQL
+sudo -u postgres psql
+
+# Drop and recreate database
+DROP DATABASE telegram_bot;
+CREATE DATABASE telegram_bot;
+GRANT ALL PRIVILEGES ON DATABASE telegram_bot TO telegram_user;
+\q
+
+# Run migration
+python3 -m src.migrate_db --reset
+```
+
+**SQLite:**
+```bash
+# Delete database file
+rm bot.db  # Linux
+# del bot.db  # Windows
+
+# Run migration to recreate
+python3 -m src.migrate_db --reset
+```
+
+#### Rebuild Virtual Environment Only
+
+```bash
+# Deactivate current environment (if active)
+deactivate
+
+# Remove old venv
+rm -rf venv  # Linux
+# rmdir /s venv  # Windows
+
+# Create new venv
+python3 -m venv venv  # Linux
+# python -m venv venv  # Windows
+
+# Activate
+source venv/bin/activate  # Linux
+# .\venv\Scripts\activate  # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+```
 
 

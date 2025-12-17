@@ -11,7 +11,7 @@ load_dotenv()
 class Settings:
     bot_token: str
     admin_ids: list[int]
-    db_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/telegram_bot"
+    db_url: str = "sqlite+aiosqlite:///./bot.db"
 
 
 def get_settings() -> Settings:
@@ -31,8 +31,9 @@ def get_settings() -> Settings:
             continue
 
     # Allow custom DB URL via environment variable
-    # Default: PostgreSQL (change to SQLite if needed: sqlite+aiosqlite:///./bot.db)
-    db_url = os.getenv("DB_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/telegram_bot")
+    # Default: SQLite (no setup required)
+    # For PostgreSQL: DB_URL=postgresql+asyncpg://user:password@localhost:5432/dbname
+    db_url = os.getenv("DB_URL", "sqlite+aiosqlite:///./bot.db")
 
     return Settings(bot_token=token, admin_ids=admin_ids, db_url=db_url)
 
