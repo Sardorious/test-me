@@ -30,7 +30,6 @@ from .models import (
     TestSession,
     TestStatus,
     User,
-    UserRole,
     Word,
     WordList,
 )
@@ -72,33 +71,42 @@ def compare_answers(student_answer: str, correct_answer: str) -> bool:
 
 def has_teacher_or_admin_permission(user: User) -> bool:
     """Check if user has teacher or admin permissions (admins have all teacher permissions)."""
-    return user.role in [UserRole.TEACHER, UserRole.ADMIN]
+    return user.is_teacher or user.is_admin
 
 
 def has_admin_permission(user: User) -> bool:
     """Check if user has admin permission."""
-    return user.role == UserRole.ADMIN
+    return user.is_admin
 
 
-async def get_or_create_user(tg_user, role_hint: UserRole | None = None) -> User:
+def has_student_permission(user: User) -> bool:
+    """Check if user has student permission."""
+    return user.is_student
+
+
+async def get_or_create_user(tg_user, role_hint=None) -> User:
     async for session in get_session():
         stmt = select(User).where(User.telegram_id == tg_user.id)
         user = await session.scalar(stmt)
         if user:
             return user  # type: ignore[return-value]
 
-        role = UserRole.STUDENT
-        if tg_user.id in settings.admin_ids:
-            role = UserRole.ADMIN
-        elif role_hint:
-            role = role_hint
+        # Set roles based on admin_ids or role_hint
+        is_admin = tg_user.id in settings.admin_ids
+        is_teacher = False
+        is_student = True  # Default to student
+        
+        # Note: role_hint is deprecated but kept for backward compatibility
+        # New code should set is_admin, is_teacher, is_student directly
 
         user = User(
             telegram_id=tg_user.id,
             username=tg_user.username,
             full_name=tg_user.full_name,
-            role=role,
-            is_registered=(role != UserRole.STUDENT),  # Admin/Teacher auto-registered
+            is_admin=is_admin,
+            is_teacher=is_teacher,
+            is_student=is_student,
+            is_registered=(is_admin or is_teacher),  # Admin/Teacher auto-registered
         )
         session.add(user)
         await session.commit()
@@ -176,7 +184,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         return
     
     # Check if student needs registration
-    if user.role == UserRole.STUDENT and not user.is_registered:
+    if user.is_student and not user.is_registered:
         await state.set_state(RegistrationStates.waiting_first_name)
         await message.answer(
             "Salom! Ro'yxatdan o'tish uchun quyidagi ma'lumotlarni kiriting.\n\n"
@@ -184,10 +192,20 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         )
         return
     
-    # Admin/Teacher or already registered student
-    if user.role == UserRole.ADMIN:
+    # Build menu based on user roles
+    roles = []
+    if user.is_admin:
+        roles.append("Admin")
+    if user.is_teacher:
+        roles.append("O'qituvchi")
+    if user.is_student:
+        roles.append("O'quvchi")
+    
+    role_text = ", ".join(roles) if roles else "Foydalanuvchi"
+    
+    if user.is_admin:
         text = (
-            "Salom, Admin! Bot boshqaruv buyruqlari:\n\n"
+            f"Salom, {role_text}! Bot boshqaruv buyruqlari:\n\n"
             "<b>O'qituvchi buyruqlari:</b>\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
@@ -196,13 +214,17 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             "/add_teacher - O'qituvchi qo'shish\n"
             "/manage_users - Foydalanuvchilarni boshqarish"
         )
-    elif user.role == UserRole.TEACHER:
+        if user.is_student:
+            text += "\n\n<b>O'quvchi buyruqlari:</b>\n/start_test - Testni boshlash"
+    elif user.is_teacher:
         text = (
-            "Salom, O'qituvchi! Bot buyruqlari:\n"
+            f"Salom, {role_text}! Bot buyruqlari:\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
             "/delete_words - So'zlar ro'yxatini o'chirish"
         )
+        if user.is_student:
+            text += "\n\n<b>O'quvchi buyruqlari:</b>\n/start_test - Testni boshlash"
     else:
         text = (
             "Salom! Men turkcha–o'zbekcha so'zlarni o'rganish uchun botman.\n\n"
@@ -229,7 +251,7 @@ async def cmd_register(message: Message, state: FSMContext) -> None:
         return
     
     # Check if admin/teacher (they don't need registration)
-    if user.role != UserRole.STUDENT:
+    if user.is_admin or user.is_teacher:
         await message.answer("Siz admin yoki o'qituvchisiz. Ro'yxatdan o'tish shart emas.")
         return
     
@@ -372,7 +394,7 @@ async def cmd_start_test(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(message.from_user)
     
     # Check if student is registered
-    if user.role == UserRole.STUDENT and not user.is_registered:
+    if user.is_student and not user.is_registered:
         await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
         return
     
@@ -1020,24 +1042,35 @@ async def _add_teacher_by_user(message: Message, target_user) -> None:
         teacher_user = await session.scalar(stmt)
         
         if teacher_user:
-            teacher_user.role = UserRole.TEACHER
+            teacher_user.is_teacher = True  # Add teacher role (keep existing roles)
             teacher_user.is_registered = True
             await session.commit()
+            roles = []
+            if teacher_user.is_admin:
+                roles.append("Admin")
+            if teacher_user.is_teacher:
+                roles.append("O'qituvchi")
+            if teacher_user.is_student:
+                roles.append("O'quvchi")
+            role_text = ", ".join(roles) if roles else "Foydalanuvchi"
+            
             name = teacher_user.full_name or teacher_user.username or f"ID: {teacher_id}"
             await message.answer(
                 f"✅ O'qituvchi muvaffaqiyatli qo'shildi!\n\n"
                 f"Foydalanuvchi: <b>{name}</b>\n"
                 f"Username: @{target_user.username or 'yo\'q'}\n"
                 f"User ID: {teacher_id}\n"
-                f"Role: O'qituvchi"
+                f"Rollar: {role_text}"
             )
         else:
-            # Create new user as teacher
+            # Create new user as teacher (also student by default)
             new_teacher = User(
                 telegram_id=teacher_id,
                 username=target_user.username,
                 full_name=target_user.full_name,
-                role=UserRole.TEACHER,
+                is_admin=False,
+                is_teacher=True,
+                is_student=True,  # Default to student
                 is_registered=True,
             )
             session.add(new_teacher)
@@ -1048,7 +1081,7 @@ async def _add_teacher_by_user(message: Message, target_user) -> None:
                 f"Foydalanuvchi: <b>{name}</b>\n"
                 f"Username: @{target_user.username or 'yo\'q'}\n"
                 f"User ID: {teacher_id}\n"
-                f"Role: O'qituvchi"
+                f"Rollar: O'qituvchi, O'quvchi"
             )
 
 
@@ -1098,19 +1131,30 @@ async def handle_teacher_identifier(message: Message, state: FSMContext) -> None
         teacher_user = await session.scalar(stmt)
         
         if teacher_user:
-            teacher_user.role = UserRole.TEACHER
+            teacher_user.is_teacher = True  # Add teacher role (keep existing roles)
             teacher_user.is_registered = True  # Teachers are auto-registered
             await session.commit()
+            roles = []
+            if teacher_user.is_admin:
+                roles.append("Admin")
+            if teacher_user.is_teacher:
+                roles.append("O'qituvchi")
+            if teacher_user.is_student:
+                roles.append("O'quvchi")
+            role_text = ", ".join(roles) if roles else "Foydalanuvchi"
+            
             await message.answer(
                 f"✅ O'qituvchi muvaffaqiyatli qo'shildi!\n\n"
                 f"Foydalanuvchi: {teacher_user.full_name or teacher_user.username or f'ID: {teacher_id}'}\n"
-                f"Role: O'qituvchi"
+                f"Rollar: {role_text}"
             )
         else:
-            # Create new user as teacher
+            # Create new user as teacher (also student by default)
             new_teacher = User(
                 telegram_id=teacher_id,
-                role=UserRole.TEACHER,
+                is_admin=False,
+                is_teacher=True,
+                is_student=True,  # Default to student
                 is_registered=True,
             )
             session.add(new_teacher)
@@ -1118,7 +1162,7 @@ async def handle_teacher_identifier(message: Message, state: FSMContext) -> None
             await message.answer(
                 f"✅ Yangi o'qituvchi yaratildi!\n\n"
                 f"User ID: {teacher_id}\n"
-                f"Role: O'qituvchi\n\n"
+                f"Rollar: O'qituvchi, O'quvchi\n\n"
                 f"Foydalanuvchi botga /start yuborishi kerak."
             )
     
@@ -1270,7 +1314,7 @@ async def _perform_user_action(message: Message, action: str, user_db_id: int, s
             return
         
         # Prevent modifying other admins
-        if target_user.role == UserRole.ADMIN:
+        if target_user.is_admin:
             await message.answer("❌ Boshqa adminlarni o'zgartira olmaysiz.")
             await state.clear()
             return
@@ -1335,11 +1379,21 @@ async def _list_users(message: Message) -> None:
         text_parts = ["👥 <b>Foydalanuvchilar ro'yxati:</b>\n"]
         
         for u in users:
-            role_emoji = {
-                UserRole.ADMIN: "👑",
-                UserRole.TEACHER: "👨‍🏫",
-                UserRole.STUDENT: "👤"
-            }
+            # Build role display
+            roles = []
+            role_emojis = []
+            if u.is_admin:
+                roles.append("Admin")
+                role_emojis.append("👑")
+            if u.is_teacher:
+                roles.append("O'qituvchi")
+                role_emojis.append("👨‍🏫")
+            if u.is_student:
+                roles.append("O'quvchi")
+                role_emojis.append("👤")
+            
+            role_text = ", ".join(roles) if roles else "Foydalanuvchi"
+            role_emoji = "".join(role_emojis) if role_emojis else "👤"
             
             status = "🚫 Bloklangan" if u.is_blocked else "✅ Faol"
             registered = "✅" if u.is_registered else "❌"
@@ -1349,8 +1403,8 @@ async def _list_users(message: Message) -> None:
                 name = u.full_name or f"ID: {u.telegram_id}"
             
             text_parts.append(
-                f"\n{role_emoji.get(u.role, '👤')} <b>{name}</b>\n"
-                f"Role: {u.role.value} | {status}\n"
+                f"\n{role_emoji} <b>{name}</b>\n"
+                f"Rollar: {role_text} | {status}\n"
                 f"Ro'yxatdan o'tgan: {registered}\n"
                 f"ID: {u.telegram_id}\n"
                 f"{'─' * 20}"
@@ -1597,7 +1651,7 @@ async def delete_choose_level(callback: CallbackQuery, state: FSMContext) -> Non
     async for session in get_session():
         # If user is teacher (not admin), only show their own word lists
         # If user is admin, show all word lists
-        if user.role == UserRole.TEACHER:
+        if user.is_teacher and not user.is_admin:
             stmt = select(WordList).where(
                 WordList.cefr_level == level,
                 WordList.owner_id == user.id
@@ -1640,7 +1694,7 @@ async def delete_choose_wordlist(callback: CallbackQuery, state: FSMContext) -> 
             return
         
         # Check permissions: teachers can only delete their own, admins can delete any
-        if user.role == UserRole.TEACHER and wordlist.owner_id != user.id:
+        if user.is_teacher and not user.is_admin and wordlist.owner_id != user.id:
             await callback.answer("Siz faqat o'z ro'yxatlaringizni o'chira olasiz.", show_alert=True)
             await state.clear()
             return
@@ -1697,7 +1751,7 @@ async def delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             return
         
         # Check permissions again: teachers can only delete their own, admins can delete any
-        if user.role == UserRole.TEACHER and wordlist.owner_id != user.id:
+        if user.is_teacher and not user.is_admin and wordlist.owner_id != user.id:
             await callback.answer("Ruxsat yo'q.", show_alert=True)
             await state.clear()
             return

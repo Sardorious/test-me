@@ -42,9 +42,10 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="user_role"), default=UserRole.STUDENT, nullable=False
-    )
+    # Multiple roles support: a user can be admin, teacher, and student simultaneously
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_teacher: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_student: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # Default to student
     is_registered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     preferred_cefr_level: Mapped[str | None] = mapped_column(String(4), nullable=True)

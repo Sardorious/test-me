@@ -91,40 +91,80 @@ async def create_tables_only() -> None:
 
 
 async def add_missing_columns() -> None:
-    """Add missing columns to existing tables."""
+    """Add missing columns to existing tables and migrate role column."""
     from sqlalchemy import text
     
     async with engine.begin() as conn:
         # Check database type
         if "postgresql" in settings.db_url.lower():
-            # PostgreSQL: Check if is_blocked column exists
+            # PostgreSQL: Check columns
             check_query = text("""
                 SELECT column_name 
                 FROM information_schema.columns 
-                WHERE table_name='users' AND column_name='is_blocked'
+                WHERE table_name='users' AND column_name IN ('is_blocked', 'is_admin', 'is_teacher', 'is_student', 'role')
             """)
             result = await conn.execute(check_query)
-            exists = result.fetchone() is not None
+            existing_columns = {row[0] for row in result.fetchall()}
             
-            if not exists:
+            # Add is_blocked if missing
+            if 'is_blocked' not in existing_columns:
                 print("Adding is_blocked column to users table...")
                 await conn.execute(text("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE NOT NULL"))
                 print("✅ Added is_blocked column")
-            else:
-                print("✅ is_blocked column already exists")
+            
+            # Migrate role column to boolean flags
+            if 'role' in existing_columns and 'is_admin' not in existing_columns:
+                print("Migrating role column to boolean flags...")
+                # Add new columns
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE NOT NULL"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_teacher BOOLEAN DEFAULT FALSE NOT NULL"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_student BOOLEAN DEFAULT TRUE NOT NULL"))
+                
+                # Migrate data from role enum to boolean flags
+                await conn.execute(text("""
+                    UPDATE users 
+                    SET is_admin = (role = 'admin'),
+                        is_teacher = (role = 'teacher'),
+                        is_student = (role = 'student')
+                """))
+                
+                print("✅ Migrated role column to boolean flags")
+                print("⚠️  Note: Old 'role' column still exists. You can drop it manually if needed.")
+            elif 'is_admin' in existing_columns:
+                print("✅ Role columns already migrated")
         
         elif "sqlite" in settings.db_url.lower():
-            # SQLite: Check if is_blocked column exists
+            # SQLite: Check columns
             check_query = text("PRAGMA table_info(users)")
             result = await conn.execute(check_query)
-            columns = [row[1] for row in result.fetchall()]
+            columns = {row[1] for row in result.fetchall()}
             
+            # Add is_blocked if missing
             if 'is_blocked' not in columns:
                 print("Adding is_blocked column to users table...")
                 await conn.execute(text("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT 0 NOT NULL"))
                 print("✅ Added is_blocked column")
-            else:
-                print("✅ is_blocked column already exists")
+            
+            # Migrate role column to boolean flags
+            if 'role' in columns and 'is_admin' not in columns:
+                print("Migrating role column to boolean flags...")
+                # Add new columns
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT 0 NOT NULL"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_teacher BOOLEAN DEFAULT 0 NOT NULL"))
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_student BOOLEAN DEFAULT 1 NOT NULL"))
+                
+                # Migrate data from role enum to boolean flags
+                await conn.execute(text("""
+                    UPDATE users 
+                    SET is_admin = (role = 'admin'),
+                        is_teacher = (role = 'teacher'),
+                        is_student = (role = 'student')
+                """))
+                
+                print("✅ Migrated role column to boolean flags")
+                print("⚠️  Note: Old 'role' column still exists. You can drop it manually if needed.")
+            elif 'is_admin' in columns:
+                print("✅ Role columns already migrated")
 
 
 if __name__ == "__main__":
