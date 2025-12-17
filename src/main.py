@@ -170,6 +170,11 @@ def build_answer_controls() -> InlineKeyboardMarkup:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     user = await get_or_create_user(message.from_user)
     
+    # Check if user is blocked
+    if user.is_blocked:
+        await message.answer("❌ Sizning akkauntingiz bloklangan. Admin bilan bog'laning.")
+        return
+    
     # Check if student needs registration
     if user.role == UserRole.STUDENT and not user.is_registered:
         await state.set_state(RegistrationStates.waiting_first_name)
@@ -186,7 +191,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
             "/delete_words - So'zlar ro'yxatini o'chirish\n"
-            "/add_teacher - O'qituvchi qo'shish"
+            "/add_teacher - O'qituvchi qo'shish\n"
+            "/manage_users - Foydalanuvchilarni boshqarish"
         )
     elif user.role == UserRole.TEACHER:
         text = (
@@ -204,8 +210,43 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 # ========== REGISTRATION HANDLERS ==========
 
+@dp.message(Command("register"))
+async def cmd_register(message: Message, state: FSMContext) -> None:
+    """Allow students to start registration."""
+    user = await get_or_create_user(message.from_user)
+    
+    # Check if user is blocked
+    if user.is_blocked:
+        await message.answer("❌ Sizning akkauntingiz bloklangan. Admin bilan bog'laning.")
+        return
+    
+    # Check if already registered
+    if user.is_registered:
+        await message.answer("Siz allaqachon ro'yxatdan o'tgansiz!")
+        return
+    
+    # Check if admin/teacher (they don't need registration)
+    if user.role != UserRole.STUDENT:
+        await message.answer("Siz admin yoki o'qituvchisiz. Ro'yxatdan o'tish shart emas.")
+        return
+    
+    await state.set_state(RegistrationStates.waiting_first_name)
+    await message.answer(
+        "Ro'yxatdan o'tish.\n\n"
+        "Ismingizni kiriting:"
+    )
+
+
 @dp.message(RegistrationStates.waiting_first_name)
 async def handle_first_name(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    # Check if user is blocked
+    if user.is_blocked:
+        await message.answer("❌ Sizning akkauntingiz bloklangan. Admin bilan bog'laning.")
+        await state.clear()
+        return
+    
     first_name = message.text.strip() if message.text else ""
     if not first_name or len(first_name) < 2:
         await message.answer("Iltimos, to'g'ri ism kiriting (kamida 2 belgi):")
@@ -486,6 +527,14 @@ async def _send_question(message: Message, state: FSMContext) -> None:
 
 @dp.message(TestStates.answering)
 async def handle_answer(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    # Check if user is blocked
+    if user.is_blocked:
+        await message.answer("❌ Sizning akkauntingiz bloklangan. Admin bilan bog'laning.")
+        await state.clear()
+        return
+    
     data = await state.get_data()
     test_session_id = data.get("test_session_id")
     current_pos = data.get("current_pos", 1)
@@ -1071,6 +1120,253 @@ async def handle_teacher_identifier(message: Message, state: FSMContext) -> None
             )
     
     await state.clear()
+
+
+# ========== USER MANAGEMENT HANDLERS ==========
+
+@dp.message(Command("manage_users"))
+async def cmd_manage_users(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if not has_admin_permission(user):
+        await message.answer("Bu buyruq faqat adminlar uchun.")
+        return
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 Foydalanuvchini o'chirish", callback_data="user_action:remove"),
+                InlineKeyboardButton(text="🚫 Bloklash", callback_data="user_action:block"),
+            ],
+            [
+                InlineKeyboardButton(text="✅ Blokdan chiqarish", callback_data="user_action:unblock"),
+                InlineKeyboardButton(text="📋 Ro'yxatni ko'rish", callback_data="user_action:list"),
+            ],
+        ]
+    )
+    
+    await message.answer(
+        "👥 <b>Foydalanuvchilarni boshqarish</b>\n\n"
+        "Amalni tanlang:",
+        reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data.startswith("user_action:"))
+async def handle_user_action(callback: CallbackQuery, state: FSMContext) -> None:
+    user = await get_or_create_user(callback.from_user)
+    
+    if not has_admin_permission(user):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    
+    action = callback.data.split(":", 1)[1]
+    
+    if action == "list":
+        await _list_users(callback.message)
+        await callback.answer()
+        return
+    
+    await state.update_data(user_action=action)
+    await state.set_state(AdminStates.waiting_user_identifier)
+    
+    action_texts = {
+        "remove": "o'chirish",
+        "block": "bloklash",
+        "unblock": "blokdan chiqarish"
+    }
+    
+    await callback.message.edit_text(
+        f"Foydalanuvchini {action_texts.get(action, action)}.\n\n"
+        "Quyidagi usullardan birini tanlang:\n"
+        "• Foydalanuvchining xabariga javob bering\n"
+        "• Foydalanuvchining xabarini forward qiling\n"
+        "• Username (@username) yoki user ID (123456789) yuboring"
+    )
+    await callback.answer()
+
+
+@dp.message(AdminStates.waiting_user_identifier)
+async def handle_user_identifier_for_action(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    action = data.get("user_action")
+    
+    if not action:
+        await message.answer("Xatolik: amal topilmadi.")
+        await state.clear()
+        return
+    
+    target_user = None
+    
+    # Check if replying to a message
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    # Check if forwarding a message
+    elif message.forward_from:
+        target_user = message.forward_from
+    # Check if text input (username or ID)
+    elif message.text:
+        identifier = message.text.strip()
+        if identifier.startswith("@"):
+            username = identifier[1:]
+            async for session in get_session():
+                stmt = select(User).where(User.username == username)
+                db_user = await session.scalar(stmt)
+                if db_user:
+                    # We need to get telegram_id, but we can't get User object from telegram
+                    # So we'll work with the database user
+                    await _perform_user_action(message, action, db_user.id, state)
+                    return
+            await message.answer(f"Foydalanuvchi '{identifier}' topilmadi.")
+            await state.clear()
+            return
+        else:
+            try:
+                user_id = int(identifier)
+                async for session in get_session():
+                    stmt = select(User).where(User.telegram_id == user_id)
+                    db_user = await session.scalar(stmt)
+                    if db_user:
+                        await _perform_user_action(message, action, db_user.id, state)
+                        return
+                await message.answer(f"Foydalanuvchi ID {user_id} topilmadi.")
+                await state.clear()
+                return
+            except ValueError:
+                await message.answer("Noto'g'ri format. Username (@username) yoki user ID kiriting.")
+                return
+    
+    if target_user:
+        async for session in get_session():
+            stmt = select(User).where(User.telegram_id == target_user.id)
+            db_user = await session.scalar(stmt)
+            if db_user:
+                await _perform_user_action(message, action, db_user.id, state)
+            else:
+                await message.answer("Foydalanuvchi bazada topilmadi.")
+                await state.clear()
+    else:
+        await message.answer("Iltimos, foydalanuvchi xabariga javob bering, forward qiling yoki username/ID kiriting.")
+
+
+async def _perform_user_action(message: Message, action: str, user_db_id: int, state: FSMContext) -> None:
+    """Perform user action (remove, block, unblock)."""
+    async for session in get_session():
+        target_user = await session.get(User, user_db_id)
+        
+        if not target_user:
+            await message.answer("Foydalanuvchi topilmadi.")
+            await state.clear()
+            return
+        
+        # Prevent admin from modifying themselves
+        admin_user = await get_or_create_user(message.from_user)
+        if target_user.id == admin_user.id:
+            await message.answer("❌ O'zingizni o'zgartira olmaysiz.")
+            await state.clear()
+            return
+        
+        # Prevent modifying other admins
+        if target_user.role == UserRole.ADMIN:
+            await message.answer("❌ Boshqa adminlarni o'zgartira olmaysiz.")
+            await state.clear()
+            return
+        
+        if action == "remove":
+            # Delete user (cascade will delete test sessions)
+            user_name = f"{target_user.first_name or ''} {target_user.last_name or ''}".strip()
+            if not user_name:
+                user_name = target_user.full_name or f"ID: {target_user.telegram_id}"
+            
+            await session.delete(target_user)
+            await session.commit()
+            
+            await message.answer(
+                f"✅ Foydalanuvchi o'chirildi!\n\n"
+                f"Foydalanuvchi: <b>{user_name}</b>\n"
+                f"Telegram ID: {target_user.telegram_id}"
+            )
+        
+        elif action == "block":
+            target_user.is_blocked = True
+            await session.commit()
+            
+            user_name = f"{target_user.first_name or ''} {target_user.last_name or ''}".strip()
+            if not user_name:
+                user_name = target_user.full_name or f"ID: {target_user.telegram_id}"
+            
+            await message.answer(
+                f"🚫 Foydalanuvchi bloklandi!\n\n"
+                f"Foydalanuvchi: <b>{user_name}</b>\n"
+                f"Telegram ID: {target_user.telegram_id}"
+            )
+        
+        elif action == "unblock":
+            target_user.is_blocked = False
+            await session.commit()
+            
+            user_name = f"{target_user.first_name or ''} {target_user.last_name or ''}".strip()
+            if not user_name:
+                user_name = target_user.full_name or f"ID: {target_user.telegram_id}"
+            
+            await message.answer(
+                f"✅ Foydalanuvchi blokdan chiqarildi!\n\n"
+                f"Foydalanuvchi: <b>{user_name}</b>\n"
+                f"Telegram ID: {target_user.telegram_id}"
+            )
+    
+    await state.clear()
+
+
+async def _list_users(message: Message) -> None:
+    """List all users with their status."""
+    async for session in get_session():
+        stmt = select(User).order_by(User.created_at.desc()).limit(50)
+        users_result = await session.scalars(stmt)
+        users = list(users_result.all())
+        
+        if not users:
+            await message.answer("Hech qanday foydalanuvchi topilmadi.")
+            return
+        
+        text_parts = ["👥 <b>Foydalanuvchilar ro'yxati:</b>\n"]
+        
+        for u in users:
+            role_emoji = {
+                UserRole.ADMIN: "👑",
+                UserRole.TEACHER: "👨‍🏫",
+                UserRole.STUDENT: "👤"
+            }
+            
+            status = "🚫 Bloklangan" if u.is_blocked else "✅ Faol"
+            registered = "✅" if u.is_registered else "❌"
+            
+            name = f"{u.first_name or ''} {u.last_name or ''}".strip()
+            if not name:
+                name = u.full_name or f"ID: {u.telegram_id}"
+            
+            text_parts.append(
+                f"\n{role_emoji.get(u.role, '👤')} <b>{name}</b>\n"
+                f"Role: {u.role.value} | {status}\n"
+                f"Ro'yxatdan o'tgan: {registered}\n"
+                f"ID: {u.telegram_id}\n"
+                f"{'─' * 20}"
+            )
+        
+        full_text = "\n".join(text_parts)
+        if len(full_text) > 4000:
+            # Send in chunks
+            chunk = ""
+            for part in text_parts:
+                if len(chunk + part) > 4000:
+                    await message.answer(chunk)
+                    chunk = part
+                else:
+                    chunk += part
+            if chunk:
+                await message.answer(chunk)
+        else:
+            await message.answer(full_text)
 
 
 # ========== UPLOAD WORDS HANDLERS ==========

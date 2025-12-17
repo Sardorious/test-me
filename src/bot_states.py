@@ -18,6 +18,8 @@ class TestStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_teacher_username = State()
+    waiting_user_identifier = State()
+    confirming_user_action = State()
 
 
 class UploadWordsStates(StatesGroup):

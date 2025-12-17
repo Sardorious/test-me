@@ -46,6 +46,7 @@ class User(Base):
         Enum(UserRole, name="user_role"), default=UserRole.STUDENT, nullable=False
     )
     is_registered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     preferred_cefr_level: Mapped[str | None] = mapped_column(String(4), nullable=True)
     preferred_direction: Mapped[TestDirection | None] = mapped_column(
         Enum(TestDirection, name="preferred_direction"), nullable=True
