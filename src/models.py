@@ -1,5 +1,5 @@
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -51,7 +51,7 @@ class User(Base):
         Enum(TestDirection, name="preferred_direction"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
     test_sessions: Mapped[list["TestSession"]] = relationship(
@@ -72,7 +72,7 @@ class WordList(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
     words: Mapped[list["Word"]] = relationship(
@@ -117,7 +117,7 @@ class TestSession(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

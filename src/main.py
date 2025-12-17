@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from random import shuffle
 
 from aiogram import Bot, Dispatcher, F
@@ -44,6 +44,30 @@ dp = Dispatcher()
 
 
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
+
+
+def normalize_answer(text: str) -> str:
+    """
+    Normalize answer text for case-insensitive comparison.
+    Converts to lowercase, strips whitespace, and handles special cases.
+    """
+    if not text:
+        return ""
+    # Convert to lowercase and strip whitespace
+    normalized = text.lower().strip()
+    # Remove extra whitespace (multiple spaces)
+    normalized = " ".join(normalized.split())
+    return normalized
+
+
+def compare_answers(student_answer: str, correct_answer: str) -> bool:
+    """
+    Compare student answer with correct answer in a case-insensitive manner.
+    Both answers are normalized (lowercased, trimmed) before comparison.
+    """
+    if not student_answer:
+        return False
+    return normalize_answer(student_answer) == normalize_answer(correct_answer)
 
 
 def has_teacher_or_admin_permission(user: User) -> bool:
@@ -482,11 +506,7 @@ async def handle_answer(message: Message, state: FSMContext) -> None:
             return
 
         q.student_answer = answer_text
-        q.is_correct = (
-            answer_text.lower().strip() == q.correct_answer.lower().strip()
-            if answer_text
-            else False
-        )
+        q.is_correct = compare_answers(answer_text, q.correct_answer)
         await session.commit()
 
     await state.update_data(current_pos=current_pos + 1)
@@ -580,7 +600,7 @@ async def _finish_test_and_show_result(
         percent = int((correct / total) * 100) if total else 0
 
         test_session.status = TestStatus.FINISHED
-        test_session.finished_at = datetime.utcnow()
+        test_session.finished_at = datetime.now(timezone.utc)
         await session.commit()
 
         await state.clear()
@@ -692,7 +712,7 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
             
             # Apply day filter
             if filter_day and filter_day != "all":
-                today = datetime.utcnow().date()
+                today = datetime.now(timezone.utc).date()
                 if filter_day == "today":
                     query = query.where(func.date(TestSession.finished_at) == today)
                 elif filter_day == "yesterday":
@@ -748,13 +768,21 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
                 direction_text = "TR➜UZ" if test_session.direction == TestDirection.TR_TO_UZ else "UZ➜TR"
                 finished_date = test_session.finished_at.strftime("%Y-%m-%d %H:%M") if test_session.finished_at else "N/A"
                 
+                incorrect_count = total - correct
+                
                 text_parts.append(
                     f"\n👤 <b>{student_name}</b>\n"
                     f"📅 {finished_date}\n"
                     f"🎓 {test_session.cefr_level} | {direction_text}\n"
                     f"✅ {correct}/{total} ({percent}%)\n"
-                    f"{'─' * 20}"
+                    f"❌ Xatolar: {incorrect_count}"
                 )
+                
+                # Add button to view mistakes if there are any
+                if incorrect_count > 0:
+                    text_parts[-1] += f"\n🔍 Xatolarni ko'rish: /view_mistakes_{test_session.id}"
+                
+                text_parts.append(f"{'─' * 20}")
             
             # Split into chunks if too long (Telegram limit ~4096 chars)
             full_text = "\n".join(text_parts)
@@ -774,6 +802,131 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
             
             await callback.answer()
             await state.clear()
+
+
+# ========== VIEW MISTAKES HANDLERS ==========
+
+@dp.message(Command("view_mistakes"))
+async def cmd_view_mistakes(message: Message, state: FSMContext) -> None:
+    """View mistakes for a specific test session."""
+    user = await get_or_create_user(message.from_user)
+    
+    if not has_teacher_or_admin_permission(user):
+        await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
+        return
+    
+    # Parse command: /view_mistakes_123
+    command_parts = message.text.split("_")
+    if len(command_parts) < 3:
+        await message.answer(
+            "Noto'g'ri format. Quyidagicha ishlating:\n"
+            "/view_results - natijalarni ko'ring va xatolarni ko'rish tugmasini bosing"
+        )
+        return
+    
+    try:
+        session_id = int(command_parts[2])
+    except ValueError:
+        await message.answer("Noto'g'ri test ID.")
+        return
+    
+    await _show_mistakes(message, session_id)
+
+
+async def _show_mistakes(message: Message, session_id: int) -> None:
+    """Show incorrect answers for a test session."""
+    async for session in get_session():
+        # Get test session
+        test_session = await session.get(TestSession, session_id)
+        if not test_session:
+            await message.answer("Test topilmadi.")
+            return
+        
+        # Get student
+        student = await session.get(User, test_session.student_id)
+        if not student:
+            await message.answer("O'quvchi topilmadi.")
+            return
+        
+        # Get all questions
+        questions_stmt = select(TestQuestion).where(
+            TestQuestion.test_session_id == session_id
+        ).order_by(TestQuestion.position)
+        questions_result = await session.scalars(questions_stmt)
+        questions = list(questions_result.all())
+        
+        # Filter incorrect answers
+        incorrect_questions = [q for q in questions if not q.is_correct and q.student_answer]
+        
+        if not incorrect_questions:
+            await message.answer(
+                f"✅ <b>{student.first_name or ''} {student.last_name or ''}</b> uchun xatolar topilmadi.\n"
+                f"Barcha javoblar to'g'ri!"
+            )
+            return
+        
+        # Get words for display
+        word_ids = [q.word_id for q in incorrect_questions]
+        words_stmt = select(Word).where(Word.id.in_(word_ids))
+        words_result = await session.scalars(words_stmt)
+        words_dict = {w.id: w for w in words_result.all()}
+        
+        # Format mistakes
+        student_name = f"{student.first_name or ''} {student.last_name or ''}".strip()
+        if not student_name:
+            student_name = student.full_name or f"ID: {student.telegram_id}"
+        
+        direction_text = "TR➜UZ" if test_session.direction == TestDirection.TR_TO_UZ else "UZ➜TR"
+        
+        text_parts = [
+            f"❌ <b>{student_name} - Xatolar</b>\n",
+            f"📅 {test_session.finished_at.strftime('%Y-%m-%d %H:%M') if test_session.finished_at else 'N/A'}\n",
+            f"🎓 {test_session.cefr_level} | {direction_text}\n",
+            f"Xatolar soni: <b>{len(incorrect_questions)}</b>\n",
+            f"{'=' * 25}\n"
+        ]
+        
+        for q in incorrect_questions:
+            word = words_dict.get(q.word_id)
+            if not word:
+                continue
+            
+            # Show the question word
+            if q.shown_lang == "tr":
+                question_word = word.turkish
+                answer_lang = "Uzbek"
+            else:
+                question_word = word.uzbek
+                answer_lang = "Turkish"
+            
+            student_answer = q.student_answer or "(javob yo'q)"
+            correct_answer = q.correct_answer
+            
+            text_parts.append(
+                f"\n❓ <b>{question_word}</b> ({answer_lang})\n"
+                f"❌ Sizning javobingiz: <code>{student_answer}</code>\n"
+                f"✅ To'g'ri javob: <code>{correct_answer}</code>\n"
+                f"{'─' * 20}"
+            )
+        
+        # Send in chunks if too long
+        full_text = "\n".join(text_parts)
+        if len(full_text) > 4000:
+            # Send header first
+            await message.answer(text_parts[0] + text_parts[1] + text_parts[2] + text_parts[3] + text_parts[4])
+            
+            # Send mistakes in chunks
+            chunk = ""
+            for part in text_parts[5:]:
+                if len(chunk + part) > 4000:
+                    await message.answer(chunk)
+                    chunk = part
+                else:
+                    chunk += part
+            if chunk:
+                await message.answer(chunk)
+        else:
+            await message.answer(full_text)
 
 
 # ========== ADMIN COMMANDS ==========
@@ -1059,7 +1212,7 @@ async def handle_upload_file(message: Message, state: FSMContext) -> None:
         async for session in get_session():
             # Create word list
             word_list = WordList(
-                name=f"{cefr_level}_words_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+                name=f"{cefr_level}_words_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
                 cefr_level=cefr_level,
                 owner_id=user.id,
             )
