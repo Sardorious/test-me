@@ -68,6 +68,11 @@ async def create_tables_only() -> None:
     
     try:
         await init_db()
+        
+        # Add missing columns to existing tables
+        print("\nChecking for missing columns...")
+        await add_missing_columns()
+        
         print("✅ Done!")
     except Exception as e:
         print(f"\n❌ Error: {e}")
@@ -83,6 +88,43 @@ async def create_tables_only() -> None:
         elif "sqlite" in settings.db_url.lower():
             print("\n💡 SQLite error. Check file permissions.")
         sys.exit(1)
+
+
+async def add_missing_columns() -> None:
+    """Add missing columns to existing tables."""
+    from sqlalchemy import text
+    
+    async with engine.begin() as conn:
+        # Check database type
+        if "postgresql" in settings.db_url.lower():
+            # PostgreSQL: Check if is_blocked column exists
+            check_query = text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='users' AND column_name='is_blocked'
+            """)
+            result = await conn.execute(check_query)
+            exists = result.fetchone() is not None
+            
+            if not exists:
+                print("Adding is_blocked column to users table...")
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE NOT NULL"))
+                print("✅ Added is_blocked column")
+            else:
+                print("✅ is_blocked column already exists")
+        
+        elif "sqlite" in settings.db_url.lower():
+            # SQLite: Check if is_blocked column exists
+            check_query = text("PRAGMA table_info(users)")
+            result = await conn.execute(check_query)
+            columns = [row[1] for row in result.fetchall()]
+            
+            if 'is_blocked' not in columns:
+                print("Adding is_blocked column to users table...")
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT 0 NOT NULL"))
+                print("✅ Added is_blocked column")
+            else:
+                print("✅ is_blocked column already exists")
 
 
 if __name__ == "__main__":
