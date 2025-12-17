@@ -913,13 +913,13 @@ async def handle_filter(callback: CallbackQuery, state: FSMContext) -> None:
                 if incorrect_count > 0:
                     text_parts[-1] += f"\n🔍 Xatolarni ko'rish: /view_mistakes_{last_session.id}"
                 
-                # Show other 5 tests as numbers (if more than 1 test)
+                # Show other 5 tests as clickable links (if more than 1 test)
                 if len(sessions_list) > 1:
                     other_tests = sessions_list[1:6]  # Next 5 tests
-                    test_ids = [str(test_sess.id) for test_sess, _ in other_tests]
+                    test_links = [f"/view_mistakes_{test_sess.id}" for test_sess, _ in other_tests]
                     
-                    if test_ids:
-                        text_parts.append(f"\n📋 Boshqa testlar: {', '.join(test_ids)}")
+                    if test_links:
+                        text_parts.append(f"\n📋 Boshqa testlar: {', '.join(test_links)}")
                 
                 text_parts.append(f"{'─' * 20}")
             
