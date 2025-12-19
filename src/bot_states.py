@@ -45,3 +45,7 @@ class DeleteDegreeStates(StatesGroup):
     confirming_delete = State()
 
 
+class GoogleSheetsStates(StatesGroup):
+    waiting_sheet_url = State()
+
+

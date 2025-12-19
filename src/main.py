@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from sqlalchemy import and_, func, select
 
-from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates, DeleteWordsStates, DeleteUnitStates, DeleteDegreeStates
+from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates, DeleteWordsStates, DeleteUnitStates, DeleteDegreeStates, GoogleSheetsStates
 from .config import settings
 from .db import get_session, init_db
 from .models import (
@@ -237,6 +237,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             "<b>O'qituvchi buyruqlari:</b>\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
+            "/import_google_sheets - Google Sheets dan so'zlar import qilish\n"
             "/delete_words - So'zlar ro'yxatini o'chirish\n"
             "/delete_unit - Unitni o'chirish\n\n"
             "<b>Admin buyruqlari:</b>\n"
@@ -251,6 +252,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             f"Salom, {role_text}! Bot buyruqlari:\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
+            "/import_google_sheets - Google Sheets dan so'zlar import qilish\n"
             "/delete_words - So'zlar ro'yxatini o'chirish\n"
             "/delete_unit - Unitni o'chirish"
         )
@@ -2484,6 +2486,253 @@ async def delete_degree_cancel(callback: CallbackQuery, state: FSMContext) -> No
     await callback.message.edit_text("❌ O'chirish bekor qilindi.")
     await callback.answer()
     await state.clear()
+
+
+# ========== GOOGLE SHEETS IMPORT HANDLERS ==========
+
+def extract_spreadsheet_id(url: str) -> str | None:
+    """Extract spreadsheet ID from Google Sheets URL."""
+    import re
+    # Pattern: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/...
+    pattern = r'/spreadsheets/d/([a-zA-Z0-9-_]+)'
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def parse_sheet_name(sheet_name: str) -> tuple[str | None, int | None]:
+    """
+    Parse sheet name to extract CEFR level and Unit number.
+    Examples: "A1 Unit-1" -> (A1, 1), "B2 Unit-5" -> (B2, 5)
+    """
+    import re
+    # Pattern: {CEFR_LEVEL} Unit-{NUMBER} or {CEFR_LEVEL} Unit {NUMBER}
+    pattern = r'([A-C][1-2])\s+Unit[- ]?(\d+)'
+    match = re.search(pattern, sheet_name, re.IGNORECASE)
+    if match:
+        cefr_level = match.group(1).upper()
+        unit_number = int(match.group(2))
+        return cefr_level, unit_number
+    return None, None
+
+
+def get_google_sheets_service():
+    """Get authenticated Google Sheets service."""
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    
+    if not settings.google_sheets_credentials_path:
+        raise ValueError("GOOGLE_SHEETS_CREDENTIALS_PATH not configured")
+    
+    credentials = service_account.Credentials.from_service_account_file(
+        settings.google_sheets_credentials_path,
+        scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+    )
+    
+    service = build('sheets', 'v4', credentials=credentials)
+    return service
+
+
+@dp.message(Command("import_google_sheets"))
+async def cmd_import_google_sheets(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if not has_teacher_or_admin_permission(user):
+        await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
+        return
+    
+    if not settings.google_sheets_credentials_path:
+        await message.answer(
+            "❌ Google Sheets integratsiyasi sozlashmagan.\n\n"
+            "Iltimos, GOOGLE_SHEETS_CREDENTIALS_PATH o'rnating."
+        )
+        return
+    
+    await state.set_state(GoogleSheetsStates.waiting_sheet_url)
+    await message.answer(
+        "📊 Google Sheets dan so'zlar import qilish.\n\n"
+        "Google Sheets URL ni yuboring.\n\n"
+        "Format: Sheet nomi <b>A1 Unit-1</b> formatida bo'lishi kerak.\n"
+        "B ustuni: Turkcha so'zlar\n"
+        "C ustuni: O'zbekcha tarjimalar (bir nechta bo'lsa, ; bilan ajratilgan)\n\n"
+        "Masalan: <code>https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit</code>"
+    )
+
+
+@dp.message(GoogleSheetsStates.waiting_sheet_url)
+async def handle_google_sheets_url(message: Message, state: FSMContext) -> None:
+    url = message.text.strip() if message.text else ""
+    
+    if not url:
+        await message.answer("Iltimos, Google Sheets URL ni yuboring.")
+        return
+    
+    spreadsheet_id = extract_spreadsheet_id(url)
+    if not spreadsheet_id:
+        await message.answer(
+            "❌ Noto'g'ri URL format.\n\n"
+            "Iltimos, to'g'ri Google Sheets URL ni yuboring.\n"
+            "Masalan: <code>https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit</code>"
+        )
+        return
+    
+    await message.answer("📥 Google Sheets dan ma'lumotlar olinmoqda...")
+    
+    try:
+        service = get_google_sheets_service()
+        
+        # Get spreadsheet metadata to list all sheets
+        spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        sheets = spreadsheet.get('sheets', [])
+        
+        if not sheets:
+            await message.answer("❌ Spreadsheet da hech qanday sheet topilmadi.")
+            await state.clear()
+            return
+        
+        # Find sheet matching pattern "A1 Unit-1", "B2 Unit-5", etc.
+        target_sheet = None
+        cefr_level = None
+        unit_number = None
+        
+        for sheet in sheets:
+            sheet_title = sheet.get('properties', {}).get('title', '')
+            parsed_level, parsed_unit = parse_sheet_name(sheet_title)
+            if parsed_level and parsed_unit:
+                target_sheet = sheet_title
+                cefr_level = parsed_level
+                unit_number = parsed_unit
+                break
+        
+        if not target_sheet:
+            await message.answer(
+                "❌ Sheet nomi to'g'ri formatda emas.\n\n"
+                "Sheet nomi quyidagi formatda bo'lishi kerak:\n"
+                "<code>A1 Unit-1</code>, <code>B2 Unit-5</code>, va hokazo.\n\n"
+                "Topilgan sheetlar:\n" + "\n".join([s.get('properties', {}).get('title', '') for s in sheets])
+            )
+            await state.clear()
+            return
+        
+        # Read data from columns B and C (skip header row if exists)
+        range_name = f"{target_sheet}!B:C"
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=range_name
+        ).execute()
+        
+        values = result.get('values', [])
+        
+        if not values:
+            await message.answer("❌ Sheet bo'sh yoki ma'lumotlar topilmadi.")
+            await state.clear()
+            return
+        
+        # Parse words: B column = Turkish, C column = Uzbek translations
+        words_parsed = []
+        valid_count = 0
+        error_count = 0
+        errors = []
+        
+        for row_num, row in enumerate(values, start=1):
+            # Skip empty rows
+            if not row or len(row) < 2:
+                continue
+            
+            turkish = row[0].strip() if len(row) > 0 and row[0] else ""
+            uzbek_raw = row[1].strip() if len(row) > 1 and row[1] else ""
+            
+            if not turkish or not uzbek_raw:
+                error_count += 1
+                errors.append(f"Qator {row_num}: bo'sh so'z")
+                continue
+            
+            # Clean up multiple translations (remove extra spaces, normalize separators)
+            uzbek_translations = [t.strip() for t in uzbek_raw.split(";")]
+            uzbek_translations = [t for t in uzbek_translations if t]  # Remove empty strings
+            uzbek = "; ".join(uzbek_translations)  # Join with "; " for storage
+            
+            words_parsed.append((turkish, uzbek))
+            valid_count += 1
+        
+        if not words_parsed:
+            await message.answer(
+                "❌ Hech qanday to'g'ri so'z topilmadi.\n\n"
+                "B ustuni: Turkcha so'zlar\n"
+                "C ustuni: O'zbekcha tarjimalar"
+            )
+            await state.clear()
+            return
+        
+        # Get or create Unit
+        user = await get_or_create_user(message.from_user)
+        
+        async for session in get_session():
+            # Check if unit exists
+            stmt = select(Unit).where(
+                Unit.cefr_level == cefr_level,
+                Unit.unit_number == unit_number
+            )
+            unit = await session.scalar(stmt)
+            
+            if not unit:
+                # Create unit
+                unit = Unit(
+                    name=f"Unit {unit_number}",
+                    cefr_level=cefr_level,
+                    unit_number=unit_number,
+                )
+                session.add(unit)
+                await session.flush()
+            
+            # Create word list
+            word_list = WordList(
+                name=f"{target_sheet}_import_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                unit_id=unit.id,
+                owner_id=user.id,
+            )
+            session.add(word_list)
+            await session.flush()
+            
+            # Add words
+            words_to_add = []
+            for turkish, uzbek in words_parsed:
+                word = Word(
+                    turkish=turkish,
+                    uzbek=uzbek,
+                    word_list_id=word_list.id,
+                )
+                words_to_add.append(word)
+            
+            session.add_all(words_to_add)
+            await session.commit()
+        
+        # Success message
+        success_msg = (
+            f"✅ So'zlar muvaffaqiyatli import qilindi!\n\n"
+            f"Sheet: <b>{target_sheet}</b>\n"
+            f"CEFR daraja: <b>{cefr_level}</b>\n"
+            f"Unit: <b>Unit {unit_number}</b>\n"
+            f"To'g'ri so'zlar: <b>{valid_count}</b>\n"
+        )
+        
+        if error_count > 0:
+            success_msg += f"Xatoliklar: <b>{error_count}</b>\n"
+            if len(errors) <= 5:
+                success_msg += "\nXatoliklar:\n" + "\n".join(errors[:5])
+            else:
+                success_msg += f"\nBirinchi 5 ta xatolik:\n" + "\n".join(errors[:5])
+        
+        await message.answer(success_msg)
+        await state.clear()
+        
+    except Exception as e:
+        error_msg = f"❌ Xatolik yuz berdi: {str(e)}"
+        if "credentials" in str(e).lower() or "permission" in str(e).lower():
+            error_msg += "\n\n💡 Eslatma: Google Sheet ni service account email ga share qilish kerak."
+        await message.answer(error_msg)
+        await state.clear()
 
 
 async def main() -> None:

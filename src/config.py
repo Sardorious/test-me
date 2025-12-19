@@ -12,6 +12,7 @@ class Settings:
     bot_token: str
     admin_ids: list[int]
     db_url: str = "sqlite+aiosqlite:///./bot.db"
+    google_sheets_credentials_path: str | None = None
 
 
 def get_settings() -> Settings:
@@ -34,8 +35,17 @@ def get_settings() -> Settings:
     # Default: SQLite (no setup required)
     # For PostgreSQL: DB_URL=postgresql+asyncpg://user:password@localhost:5432/dbname
     db_url = os.getenv("DB_URL", "sqlite+aiosqlite:///./bot.db")
+    
+    # Google Sheets service account credentials path (optional)
+    # Path to JSON key file for Google Sheets API
+    google_sheets_credentials_path = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", None)
 
-    return Settings(bot_token=token, admin_ids=admin_ids, db_url=db_url)
+    return Settings(
+        bot_token=token,
+        admin_ids=admin_ids,
+        db_url=db_url,
+        google_sheets_credentials_path=google_sheets_credentials_path
+    )
 
 
 settings = get_settings()
