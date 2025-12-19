@@ -14,12 +14,19 @@ Each line should contain one word pair in the following format:
 turkish_word - uzbek_translation
 ```
 
+### Multiple Translations
+You can specify multiple correct translations for a word by separating them with semicolons (`;`):
+```
+turkish_word - uzbek_translation1; uzbek_translation2; uzbek_translation3
+```
+
 ### Important Notes:
 1. **Separator**: Use a single dash (`-`) with spaces on both sides to separate Turkish and Uzbek words
-2. **One word per line**: Each line should contain only one word pair
-3. **No empty lines**: Skip empty lines (they will be ignored)
-4. **Case insensitive**: Turkish and Uzbek words can be in any case
-5. **Special characters**: Turkish characters (ç, ğ, ı, ö, ş, ü) and Uzbek characters (o', g', ch, sh) are supported
+2. **Multiple translations**: Use semicolon (`;`) to separate multiple correct answers (2-3 translations recommended)
+3. **One word per line**: Each line should contain only one word pair
+4. **No empty lines**: Skip empty lines (they will be ignored)
+5. **Case insensitive**: Turkish and Uzbek words can be in any case
+6. **Special characters**: Turkish characters (ç, ğ, ı, ö, ş, ü) and Uzbek characters (o', g', ch, sh) are supported
 
 ## Examples
 
@@ -28,6 +35,8 @@ turkish_word - uzbek_translation
 merhaba - salom
 teşekkür ederim - rahmat
 günaydın - xayrli tong
+merhaba - salom; assalomu alaykum
+iyi - yaxshi; yaxshimisiz
 ```
 
 ### Incorrect Formats:

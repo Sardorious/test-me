@@ -29,6 +29,7 @@ from .models import (
     TestQuestion,
     TestSession,
     TestStatus,
+    Unit,
     User,
     Word,
     WordList,
@@ -61,16 +62,22 @@ def normalize_answer(text: str) -> str:
 
 def compare_answers(student_answer: str, correct_answer: str) -> bool:
     """
-    Compare student answer with correct answer in a case-insensitive manner.
+    Compare student answer with correct answer(s) in a case-insensitive manner.
+    Supports multiple correct answers separated by semicolon (;).
     Both answers are normalized (lowercased, trimmed) before comparison.
     Case (big/small letters) does not affect the result.
     """
     if not student_answer:
         return False
-    # Normalize both answers to lowercase for case-insensitive comparison
+    
+    # Normalize student answer
     student_normalized = normalize_answer(student_answer)
-    correct_normalized = normalize_answer(correct_answer)
-    return student_normalized == correct_normalized
+    
+    # Split correct answers by semicolon and check each one
+    correct_answers = [normalize_answer(ans.strip()) for ans in correct_answer.split(";")]
+    
+    # Check if student answer matches any of the correct answers
+    return student_normalized in correct_answers
 
 
 def has_teacher_or_admin_permission(user: User) -> bool:
@@ -475,11 +482,12 @@ async def _create_test_session_for_user(
     user: User, level: str, direction: TestDirection, count: int | None
 ) -> TestSession | None:
     async for session in get_session():
-        # Select all words for this level
+        # Select all words for this level (through Unit)
         stmt = (
             select(Word)
             .join(WordList)
-            .where(WordList.cefr_level == level)
+            .join(Unit)
+            .where(Unit.cefr_level == level)
         )
         words_result = await session.scalars(stmt)
         words = list(words_result.all())
@@ -504,9 +512,11 @@ async def _create_test_session_for_user(
         for idx, w in enumerate(words, start=1):
             if direction == TestDirection.TR_TO_UZ:
                 shown_lang = "tr"
+                # uzbek field may contain multiple translations separated by semicolon
                 correct_answer = w.uzbek
             else:
                 shown_lang = "uz"
+                # For UZ->TR, turkish is single, but we keep the format consistent
                 correct_answer = w.turkish
             q = TestQuestion(
                 test_session_id=test_session.id,
@@ -1017,11 +1027,17 @@ async def _show_mistakes_to_student(
             
             student_answer = q.student_answer or "(javob yo'q)"
             correct_answer = q.correct_answer
+            # Format multiple correct answers nicely
+            correct_answers_list = [ans.strip() for ans in correct_answer.split(";")]
+            if len(correct_answers_list) > 1:
+                correct_answer_display = " / ".join([f"<code>{ans}</code>" for ans in correct_answers_list])
+            else:
+                correct_answer_display = f"<code>{correct_answer}</code>"
             
             text_parts.append(
                 f"\n❓ <b>{question_word}</b> ({answer_lang})\n"
                 f"❌ Sizning javobingiz: <code>{student_answer}</code>\n"
-                f"✅ To'g'ri javob: <code>{correct_answer}</code>\n"
+                f"✅ To'g'ri javob(lar): {correct_answer_display}\n"
                 f"{'─' * 20}"
             )
         
@@ -1117,11 +1133,17 @@ async def _show_mistakes(message: Message, session_id: int) -> None:
             
             student_answer = q.student_answer or "(javob yo'q)"
             correct_answer = q.correct_answer
+            # Format multiple correct answers nicely
+            correct_answers_list = [ans.strip() for ans in correct_answer.split(";")]
+            if len(correct_answers_list) > 1:
+                correct_answer_display = " / ".join([f"<code>{ans}</code>" for ans in correct_answers_list])
+            else:
+                correct_answer_display = f"<code>{correct_answer}</code>"
             
             mistake_text = (
                 f"\n❓ <b>{question_word}</b> ({answer_lang})\n"
                 f"❌ O'quvchi javobi: <code>{student_answer}</code>\n"
-                f"✅ Kutilgan javob: <code>{correct_answer}</code>\n"
+                f"✅ Kutilgan javob(lar): {correct_answer_display}\n"
                 f"{'─' * 20}"
             )
             
@@ -1647,17 +1669,131 @@ async def cmd_upload_words(message: Message, state: FSMContext) -> None:
     )
 
 
+def build_units_keyboard(units: list[Unit], level: str) -> InlineKeyboardMarkup:
+    """Build keyboard for selecting or creating units (1-20 per degree)."""
+    buttons = []
+    
+    # Show existing units
+    if units:
+        for unit in sorted(units, key=lambda u: u.unit_number):
+            button_text = f"Unit {unit.unit_number}: {unit.name}"
+            buttons.append([
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"unit:{unit.id}"
+                )
+            ])
+    
+    # Add button to create new unit (if less than 20 units exist)
+    if len(units) < 20:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"➕ Yangi Unit yaratish (Unit {len(units) + 1})",
+                callback_data=f"unit:new"
+            )
+        ])
+    
+    buttons.append([
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="unit:cancel")
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @dp.callback_query(UploadWordsStates.choosing_level, F.data.startswith("level:"))
 async def upload_choose_level(callback: CallbackQuery, state: FSMContext) -> None:
     level = callback.data.split(":", 1)[1]
     await state.update_data(cefr_level=level)
-    await state.set_state(UploadWordsStates.waiting_file)
+    
+    # Get existing units for this level
+    async for session in get_session():
+        stmt = select(Unit).where(Unit.cefr_level == level)
+        units_result = await session.scalars(stmt)
+        units = list(units_result.all())
+    
+    await state.set_state(UploadWordsStates.choosing_unit)
     await callback.message.edit_text(
         f"CEFR daraja: <b>{level}</b>\n\n"
-        "Endi .txt yoki .docx fayl yuboring.\n\n"
-        "Format: har bir qatorda <code>turkish_word - uzbek_translation</code>"
+        f"Mavjud Unitlar: {len(units)}/20\n\n"
+        "Unitni tanlang yoki yangi Unit yarating:",
+        reply_markup=build_units_keyboard(units, level)
     )
     await callback.answer()
+
+
+@dp.callback_query(UploadWordsStates.choosing_unit, F.data.startswith("unit:"))
+async def upload_choose_unit(callback: CallbackQuery, state: FSMContext) -> None:
+    unit_data = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    level = data.get("cefr_level")
+    
+    if not level:
+        await callback.answer("Xatolik: CEFR daraja topilmadi.", show_alert=True)
+        await state.clear()
+        return
+    
+    async for session in get_session():
+        if unit_data == "new":
+            # Create new unit
+            # Find the next unit number
+            stmt = select(Unit).where(Unit.cefr_level == level)
+            existing_units = await session.scalars(stmt)
+            existing_unit_numbers = {u.unit_number for u in existing_units.all()}
+            
+            # Find first available unit number (1-20)
+            next_unit_number = None
+            for i in range(1, 21):
+                if i not in existing_unit_numbers:
+                    next_unit_number = i
+                    break
+            
+            if next_unit_number is None:
+                await callback.answer("❌ Har bir Degree uchun maksimal 20 ta Unit bo'lishi mumkin!", show_alert=True)
+                await state.clear()
+                return
+            
+            # Create new unit
+            new_unit = Unit(
+                name=f"Unit {next_unit_number}",
+                cefr_level=level,
+                unit_number=next_unit_number,
+            )
+            session.add(new_unit)
+            await session.commit()
+            await session.refresh(new_unit)
+            
+            unit_id = new_unit.id
+            unit_name = new_unit.name
+        elif unit_data == "cancel":
+            await callback.message.edit_text("❌ Bekor qilindi.")
+            await callback.answer()
+            await state.clear()
+            return
+        else:
+            # Use existing unit
+            try:
+                unit_id = int(unit_data)
+                unit = await session.get(Unit, unit_id)
+                if not unit or unit.cefr_level != level:
+                    await callback.answer("Xatolik: Unit topilmadi.", show_alert=True)
+                    await state.clear()
+                    return
+                unit_name = unit.name
+            except ValueError:
+                await callback.answer("Xatolik: noto'g'ri Unit ID.", show_alert=True)
+                await state.clear()
+                return
+        
+        await state.update_data(unit_id=unit_id, unit_name=unit_name)
+        await state.set_state(UploadWordsStates.waiting_file)
+        await callback.message.edit_text(
+            f"CEFR daraja: <b>{level}</b>\n"
+            f"Unit: <b>{unit_name}</b>\n\n"
+            "Endi .txt yoki .docx fayl yuboring.\n\n"
+            "Format: har bir qatorda <code>turkish_word - uzbek_translation1; uzbek_translation2</code>\n"
+            "Masalan: <code>merhaba - salom; assalomu alaykum</code>"
+        )
+        await callback.answer()
 
 
 @dp.message(UploadWordsStates.waiting_file, F.document)
@@ -1677,9 +1813,10 @@ async def handle_upload_file(message: Message, state: FSMContext) -> None:
     
     data = await state.get_data()
     cefr_level = data.get("cefr_level")
+    unit_id = data.get("unit_id")
     
-    if not cefr_level:
-        await message.answer("Xatolik: CEFR daraja tanlanmagan.")
+    if not cefr_level or not unit_id:
+        await message.answer("Xatolik: CEFR daraja yoki Unit tanlanmagan.")
         await state.clear()
         return
     
@@ -1733,12 +1870,18 @@ async def handle_upload_file(message: Message, state: FSMContext) -> None:
             if not line:
                 continue
             
-            # Parse format: turkish - uzbek
+            # Parse format: turkish - uzbek1; uzbek2; uzbek3
+            # Supports multiple translations separated by semicolon
             if " - " in line:
                 parts = line.split(" - ", 1)
                 if len(parts) == 2:
                     turkish = parts[0].strip()
-                    uzbek = parts[1].strip()
+                    uzbek_raw = parts[1].strip()
+                    # Clean up multiple translations (remove extra spaces, normalize separators)
+                    uzbek_translations = [t.strip() for t in uzbek_raw.split(";")]
+                    uzbek_translations = [t for t in uzbek_translations if t]  # Remove empty strings
+                    uzbek = "; ".join(uzbek_translations)  # Join with "; " for storage
+                    
                     if turkish and uzbek:
                         words_parsed.append((turkish, uzbek))
                         valid_count += 1
@@ -1766,10 +1909,17 @@ async def handle_upload_file(message: Message, state: FSMContext) -> None:
         
         # Save to database
         async for session in get_session():
-            # Create word list
+            # Verify unit exists
+            unit = await session.get(Unit, unit_id)
+            if not unit:
+                await message.answer("Xatolik: Unit topilmadi.")
+                await state.clear()
+                return
+            
+            # Create word list linked to unit
             word_list = WordList(
-                name=f"{cefr_level}_words_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-                cefr_level=cefr_level,
+                name=f"{unit.name}_words_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                unit_id=unit_id,
                 owner_id=user.id,
             )
             session.add(word_list)
@@ -1789,9 +1939,11 @@ async def handle_upload_file(message: Message, state: FSMContext) -> None:
             await session.commit()
         
         # Success message
+        unit_name = data.get("unit_name", "Unit")
         success_msg = (
             f"✅ So'zlar muvaffaqiyatli yuklandi!\n\n"
             f"CEFR daraja: <b>{cefr_level}</b>\n"
+            f"Unit: <b>{unit_name}</b>\n"
             f"To'g'ri so'zlar: <b>{valid_count}</b>\n"
         )
         
@@ -1850,17 +2002,25 @@ async def delete_choose_level(callback: CallbackQuery, state: FSMContext) -> Non
     
     user = await get_or_create_user(callback.from_user)
     
-    # Get word lists for this level
+    # Get word lists for this level (through Unit)
     async for session in get_session():
         # If user is teacher (not admin), only show their own word lists
         # If user is admin, show all word lists
         if user.is_teacher and not user.is_admin:
-            stmt = select(WordList).where(
-                WordList.cefr_level == level,
-                WordList.owner_id == user.id
+            stmt = (
+                select(WordList)
+                .join(Unit)
+                .where(
+                    Unit.cefr_level == level,
+                    WordList.owner_id == user.id
+                )
             )
         else:  # Admin can see all
-            stmt = select(WordList).where(WordList.cefr_level == level)
+            stmt = (
+                select(WordList)
+                .join(Unit)
+                .where(Unit.cefr_level == level)
+            )
         
         wordlists_result = await session.scalars(stmt)
         wordlists = list(wordlists_result.all())

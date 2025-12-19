@@ -24,6 +24,7 @@ class AdminStates(StatesGroup):
 
 class UploadWordsStates(StatesGroup):
     choosing_level = State()
+    choosing_unit = State()
     waiting_file = State()
 
 

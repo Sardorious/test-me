@@ -93,6 +93,7 @@ async def create_tables_only() -> None:
 async def add_missing_columns() -> None:
     """Add missing columns to existing tables and migrate role column."""
     from sqlalchemy import text
+    from .models import Unit, WordList
     
     async with engine.begin() as conn:
         # Check database type
@@ -151,6 +152,9 @@ async def add_missing_columns() -> None:
                     except Exception as e:
                         # Column might already be nullable or error occurred
                         print(f"   Role column status check: {str(e)[:100]}")
+            
+            # Migrate to Unit-based structure
+            await migrate_to_unit_structure(conn, "postgresql")
         
         elif "sqlite" in settings.db_url.lower():
             # SQLite: Check columns
@@ -185,6 +189,179 @@ async def add_missing_columns() -> None:
                 print("⚠️  Note: Old 'role' column still exists. You can drop it manually if needed.")
             elif 'is_admin' in columns:
                 print("✅ Role columns already migrated")
+            
+            # Migrate to Unit-based structure
+            await migrate_to_unit_structure(conn, "sqlite")
+
+
+async def migrate_to_unit_structure(conn, db_type: str) -> None:
+    """Migrate existing WordList structure to use Units."""
+    from sqlalchemy import text
+    from .models import Unit, WordList
+    
+    # Check if units table exists
+    if db_type == "postgresql":
+        check_units = text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'units'
+            )
+        """)
+    else:  # sqlite
+        check_units = text("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='units'
+        """)
+    
+    result = await conn.execute(check_units)
+    if db_type == "postgresql":
+        units_exists = result.scalar()
+    else:
+        units_exists = result.fetchone() is not None
+    
+    if not units_exists:
+        print("\n📦 Migrating to Unit-based structure...")
+        
+        # Create units table (will be created by Base.metadata.create_all)
+        # But we need to check if word_lists has unit_id column
+        if db_type == "postgresql":
+            check_unit_id = text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='word_lists' AND column_name='unit_id'
+            """)
+        else:
+            check_unit_id = text("PRAGMA table_info(word_lists)")
+        
+        result = await conn.execute(check_unit_id)
+        if db_type == "postgresql":
+            has_unit_id = 'unit_id' in {row[0] for row in result.fetchall()}
+        else:
+            columns = {row[1] for row in result.fetchall()}
+            has_unit_id = 'unit_id' in columns
+        
+        if not has_unit_id:
+            print("Creating Unit table and migrating data...")
+            
+            # First, ensure units table exists by creating it
+            # We'll need to import Base and create tables
+            from .db import Base
+            await conn.run_sync(lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True))
+            
+            # Check if word_lists has cefr_level column (old structure)
+            if db_type == "postgresql":
+                check_cefr = text("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name='word_lists' AND column_name='cefr_level'
+                """)
+            else:
+                check_cefr = text("PRAGMA table_info(word_lists)")
+            
+            result = await conn.execute(check_cefr)
+            if db_type == "postgresql":
+                has_cefr = 'cefr_level' in {row[0] for row in result.fetchall()}
+            else:
+                columns = {row[1] for row in result.fetchall()}
+                has_cefr = 'cefr_level' in columns
+            
+            if has_cefr:
+                print("Migrating existing WordLists to Units...")
+                
+                # Get all unique CEFR levels from word_lists
+                if db_type == "postgresql":
+                    get_levels = text("SELECT DISTINCT cefr_level FROM word_lists WHERE cefr_level IS NOT NULL")
+                else:
+                    get_levels = text("SELECT DISTINCT cefr_level FROM word_lists WHERE cefr_level IS NOT NULL")
+                
+                levels_result = await conn.execute(get_levels)
+                levels = [row[0] for row in levels_result.fetchall()]
+                
+                # Create default Unit 1 for each CEFR level
+                for level in levels:
+                    # Check if unit already exists
+                    if db_type == "postgresql":
+                        check_unit = text("""
+                            SELECT id FROM units 
+                            WHERE cefr_level = :level AND unit_number = 1
+                        """)
+                    else:
+                        check_unit = text("""
+                            SELECT id FROM units 
+                            WHERE cefr_level = :level AND unit_number = 1
+                        """)
+                    
+                    unit_check = await conn.execute(check_unit.bindparams(level=level))
+                    existing_unit = unit_check.fetchone()
+                    
+                    if not existing_unit:
+                        # Create Unit 1 for this level
+                        if db_type == "postgresql":
+                            create_unit = text("""
+                                INSERT INTO units (name, cefr_level, unit_number, created_at)
+                                VALUES (:name, :level, 1, CURRENT_TIMESTAMP)
+                                RETURNING id
+                            """)
+                        else:
+                            create_unit = text("""
+                                INSERT INTO units (name, cefr_level, unit_number, created_at)
+                                VALUES (:name, :level, 1, datetime('now'))
+                            """)
+                        
+                        await conn.execute(create_unit.bindparams(name=f"Unit 1", level=level))
+                        
+                        # Get the created unit ID
+                        if db_type == "postgresql":
+                            get_unit_id = text("""
+                                SELECT id FROM units 
+                                WHERE cefr_level = :level AND unit_number = 1
+                            """)
+                        else:
+                            get_unit_id = text("""
+                                SELECT id FROM units 
+                                WHERE cefr_level = :level AND unit_number = 1
+                            """)
+                        
+                        unit_result = await conn.execute(get_unit_id.bindparams(level=level))
+                        unit_id = unit_result.scalar()
+                        
+                        # Update word_lists to use this unit
+                        if db_type == "postgresql":
+                            # Add unit_id column if it doesn't exist
+                            try:
+                                await conn.execute(text("ALTER TABLE word_lists ADD COLUMN unit_id INTEGER"))
+                            except Exception:
+                                pass  # Column might already exist
+                            
+                            update_lists = text("""
+                                UPDATE word_lists 
+                                SET unit_id = :unit_id 
+                                WHERE cefr_level = :level
+                            """)
+                        else:
+                            # SQLite doesn't support adding NOT NULL columns easily
+                            # We'll add nullable column first
+                            try:
+                                await conn.execute(text("ALTER TABLE word_lists ADD COLUMN unit_id INTEGER"))
+                            except Exception:
+                                pass  # Column might already exist
+                            
+                            update_lists = text("""
+                                UPDATE word_lists 
+                                SET unit_id = :unit_id 
+                                WHERE cefr_level = :level
+                            """)
+                        
+                        await conn.execute(update_lists.bindparams(unit_id=unit_id, level=level))
+                        print(f"  ✅ Created Unit 1 for {level} and migrated {level} word lists")
+                
+                print("✅ Unit migration complete!")
+            else:
+                print("✅ Unit structure already in place")
+        else:
+            print("✅ Unit structure already migrated")
+    else:
+        print("✅ Units table already exists")
 
 
 if __name__ == "__main__":

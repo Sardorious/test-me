@@ -61,14 +61,38 @@ class User(Base):
     )
 
 
-class WordList(Base):
-    __tablename__ = "word_lists"
+class Unit(Base):
+    __tablename__ = "units"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     cefr_level: Mapped[str] = mapped_column(
         String(4), nullable=False
     )  # e.g. A1, A2, B1, B2, C1, C2
+    unit_number: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-20
+    description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+    word_lists: Mapped[list["WordList"]] = relationship(
+        back_populates="unit", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        # Ensure each CEFR level has at most 20 units
+        # This constraint is enforced at application level
+    )
+
+
+class WordList(Base):
+    __tablename__ = "word_lists"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    unit_id: Mapped[int] = mapped_column(
+        ForeignKey("units.id", ondelete="CASCADE"), nullable=False
+    )
     topic: Mapped[str | None] = mapped_column(String(128), nullable=True)
     owner_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -77,6 +101,7 @@ class WordList(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
+    unit: Mapped[Unit] = relationship(back_populates="word_lists")
     words: Mapped[list["Word"]] = relationship(
         back_populates="word_list", cascade="all, delete-orphan"
     )
@@ -87,7 +112,9 @@ class Word(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     turkish: Mapped[str] = mapped_column(String(128), nullable=False)
-    uzbek: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Multiple translations separated by semicolon (;)
+    # e.g., "salom;assalomu alaykum;salomlashish"
+    uzbek: Mapped[str] = mapped_column(String(512), nullable=False)  # Increased size for multiple translations
     example_sentence: Mapped[str | None] = mapped_column(Text, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -142,7 +169,9 @@ class TestQuestion(Base):
 
     # Language shown to student: "tr" or "uz"
     shown_lang: Mapped[str] = mapped_column(String(2), nullable=False)
-    correct_answer: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Multiple correct answers separated by semicolon (;)
+    # e.g., "salom;assalomu alaykum"
+    correct_answer: Mapped[str] = mapped_column(String(512), nullable=False)  # Increased size for multiple answers
 
     student_answer: Mapped[str | None] = mapped_column(String(256), nullable=True)
     is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
