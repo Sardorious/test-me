@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from sqlalchemy import and_, func, select
 
-from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates, DeleteWordsStates
+from .bot_states import TestStates, RegistrationStates, AdminStates, UploadWordsStates, DeleteWordsStates, DeleteUnitStates, DeleteDegreeStates
 from .config import settings
 from .db import get_session, init_db
 from .models import (
@@ -237,10 +237,12 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             "<b>O'qituvchi buyruqlari:</b>\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
-            "/delete_words - So'zlar ro'yxatini o'chirish\n\n"
+            "/delete_words - So'zlar ro'yxatini o'chirish\n"
+            "/delete_unit - Unitni o'chirish\n\n"
             "<b>Admin buyruqlari:</b>\n"
             "/add_teacher - O'qituvchi qo'shish\n"
-            "/manage_users - Foydalanuvchilarni boshqarish"
+            "/manage_users - Foydalanuvchilarni boshqarish\n"
+            "/delete_degree - Degree (CEFR daraja)ni o'chirish"
         )
         if user.is_student:
             text += "\n\n<b>O'quvchi buyruqlari:</b>\n/start_test - Testni boshlash"
@@ -249,7 +251,8 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             f"Salom, {role_text}! Bot buyruqlari:\n"
             "/view_results - O'quvchilar natijalarini ko'rish\n"
             "/upload_words - So'zlar yuklash\n"
-            "/delete_words - So'zlar ro'yxatini o'chirish"
+            "/delete_words - So'zlar ro'yxatini o'chirish\n"
+            "/delete_unit - Unitni o'chirish"
         )
         if user.is_student:
             text += "\n\n<b>O'quvchi buyruqlari:</b>\n/start_test - Testni boshlash"
@@ -2139,6 +2142,345 @@ async def delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
 @dp.callback_query(DeleteWordsStates.confirming_delete, F.data == "delete_cancel")
 async def delete_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text("❌ O'chirish bekor qilindi.")
+    await callback.answer()
+    await state.clear()
+
+
+# ========== DELETE UNIT HANDLERS ==========
+
+def build_units_for_deletion_keyboard(units: list[Unit]) -> InlineKeyboardMarkup:
+    """Build keyboard for selecting unit to delete."""
+    buttons = []
+    
+    for unit in sorted(units, key=lambda u: u.unit_number):
+        # Count word lists in this unit
+        word_list_count = len(unit.word_lists) if unit.word_lists else 0
+        total_words = sum(len(wl.words) if wl.words else 0 for wl in unit.word_lists) if unit.word_lists else 0
+        
+        button_text = f"Unit {unit.unit_number}: {unit.name} ({word_list_count} ro'yxat, {total_words} so'z)"
+        buttons.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"delete_unit:{unit.id}"
+            )
+        ])
+    
+    buttons.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="unit_delete_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(Command("delete_unit"))
+async def cmd_delete_unit(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if not has_teacher_or_admin_permission(user):
+        await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
+        return
+    
+    await state.set_state(DeleteUnitStates.choosing_level)
+    await message.answer(
+        "Unitni o'chirish.\n\n"
+        "Qaysi CEFR darajasidagi Unitni o'chirmoqchisiz?",
+        reply_markup=build_levels_keyboard()
+    )
+
+
+@dp.callback_query(DeleteUnitStates.choosing_level, F.data.startswith("level:"))
+async def delete_unit_choose_level(callback: CallbackQuery, state: FSMContext) -> None:
+    level = callback.data.split(":", 1)[1]
+    
+    user = await get_or_create_user(callback.from_user)
+    
+    # Get units for this level
+    async for session in get_session():
+        stmt = select(Unit).where(Unit.cefr_level == level)
+        units_result = await session.scalars(stmt)
+        units = list(units_result.all())
+        
+        if not units:
+            await callback.message.edit_text(
+                f"❌ {level} darajasida Unitlar topilmadi."
+            )
+            await callback.answer()
+            await state.clear()
+            return
+        
+        await state.update_data(cefr_level=level)
+        await state.set_state(DeleteUnitStates.choosing_unit)
+        
+        text = f"CEFR daraja: <b>{level}</b>\n\nO'chirmoqchi bo'lgan Unitni tanlang:"
+        await callback.message.edit_text(text, reply_markup=build_units_for_deletion_keyboard(units))
+        await callback.answer()
+
+
+@dp.callback_query(DeleteUnitStates.choosing_unit, F.data.startswith("delete_unit:"))
+async def delete_unit_choose_unit(callback: CallbackQuery, state: FSMContext) -> None:
+    unit_id = int(callback.data.split(":", 1)[1])
+    
+    user = await get_or_create_user(callback.from_user)
+    
+    async for session in get_session():
+        unit = await session.get(Unit, unit_id)
+        if not unit:
+            await callback.answer("Unit topilmadi.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Get word lists count and total words
+        word_lists_stmt = select(WordList).where(WordList.unit_id == unit_id)
+        word_lists_result = await session.scalars(word_lists_stmt)
+        word_lists = list(word_lists_result.all())
+        
+        total_words = 0
+        for wl in word_lists:
+            words_stmt = select(Word).where(Word.word_list_id == wl.id)
+            words_result = await session.scalars(words_stmt)
+            total_words += len(list(words_result.all()))
+        
+        await state.update_data(unit_id=unit_id)
+        await state.set_state(DeleteUnitStates.confirming_delete)
+        
+        text = (
+            f"⚠️ <b>Unitni o'chirish</b>\n\n"
+            f"Nomi: <b>{unit.name}</b>\n"
+            f"CEFR daraja: <b>{unit.cefr_level}</b>\n"
+            f"Unit raqami: <b>{unit.unit_number}</b>\n"
+            f"So'zlar ro'yxatlari: <b>{len(word_lists)}</b>\n"
+            f"Jami so'zlar: <b>{total_words}</b>\n\n"
+            f"⚠️ Bu Unitni o'chirish barcha so'zlar ro'yxatlarini va so'zlarni ham o'chiradi!\n\n"
+            f"Bu Unitni o'chirishni tasdiqlaysizmi?"
+        )
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data="unit_delete_confirm"),
+                    InlineKeyboardButton(text="❌ Yo'q", callback_data="unit_delete_cancel"),
+                ]
+            ]
+        )
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+
+@dp.callback_query(DeleteUnitStates.choosing_unit, F.data == "unit_delete_cancel")
+async def delete_unit_cancel_selection(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text("❌ Bekor qilindi.")
+    await callback.answer()
+    await state.clear()
+
+
+@dp.callback_query(DeleteUnitStates.confirming_delete, F.data == "unit_delete_confirm")
+async def delete_unit_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    unit_id = data.get("unit_id")
+    
+    if not unit_id:
+        await callback.answer("Xatolik: Unit ID topilmadi.", show_alert=True)
+        await state.clear()
+        return
+    
+    async for session in get_session():
+        unit = await session.get(Unit, unit_id)
+        if not unit:
+            await callback.answer("Unit topilmadi.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Get counts before deletion
+        word_lists_stmt = select(WordList).where(WordList.unit_id == unit_id)
+        word_lists_result = await session.scalars(word_lists_stmt)
+        word_lists = list(word_lists_result.all())
+        
+        total_words = 0
+        for wl in word_lists:
+            words_stmt = select(Word).where(Word.word_list_id == wl.id)
+            words_result = await session.scalars(words_stmt)
+            total_words += len(list(words_result.all()))
+        
+        unit_name = unit.name
+        unit_level = unit.cefr_level
+        
+        # Delete unit (cascade will delete word_lists and words)
+        await session.delete(unit)
+        await session.commit()
+        
+        await callback.message.edit_text(
+            f"✅ Unit muvaffaqiyatli o'chirildi!\n\n"
+            f"Nomi: <b>{unit_name}</b>\n"
+            f"CEFR daraja: <b>{unit_level}</b>\n"
+            f"O'chirilgan so'zlar ro'yxatlari: <b>{len(word_lists)}</b>\n"
+            f"O'chirilgan so'zlar: <b>{total_words}</b>"
+        )
+        await callback.answer("Unit o'chirildi.")
+        await state.clear()
+
+
+@dp.callback_query(DeleteUnitStates.confirming_delete, F.data == "unit_delete_cancel")
+async def delete_unit_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text("❌ O'chirish bekor qilindi.")
+    await callback.answer()
+    await state.clear()
+
+
+# ========== DELETE DEGREE HANDLERS ==========
+
+def build_degrees_for_deletion_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for selecting degree (CEFR level) to delete."""
+    buttons = []
+    
+    # Group levels in rows of 3
+    for i in range(0, len(CEFR_LEVELS), 3):
+        row_levels = CEFR_LEVELS[i:i+3]
+        buttons.append([
+            InlineKeyboardButton(text=level, callback_data=f"delete_degree:{level}")
+            for level in row_levels
+        ])
+    
+    buttons.append([InlineKeyboardButton(text="❌ Bekor qilish", callback_data="degree_delete_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(Command("delete_degree"))
+async def cmd_delete_degree(message: Message, state: FSMContext) -> None:
+    user = await get_or_create_user(message.from_user)
+    
+    if not has_admin_permission(user):
+        await message.answer("Bu buyruq faqat adminlar uchun.")
+        return
+    
+    await state.set_state(DeleteDegreeStates.choosing_degree)
+    await message.answer(
+        "⚠️ <b>Degree (CEFR daraja)ni o'chirish</b>\n\n"
+        "Bu amal barcha Unitlarni, so'zlar ro'yxatlarini va so'zlarni o'chiradi!\n\n"
+        "O'chirmoqchi bo'lgan CEFR darajasini tanlang:",
+        reply_markup=build_degrees_for_deletion_keyboard()
+    )
+
+
+@dp.callback_query(DeleteDegreeStates.choosing_degree, F.data.startswith("delete_degree:"))
+async def delete_degree_choose_degree(callback: CallbackQuery, state: FSMContext) -> None:
+    degree = callback.data.split(":", 1)[1]
+    
+    async for session in get_session():
+        # Get all units for this degree
+        units_stmt = select(Unit).where(Unit.cefr_level == degree)
+        units_result = await session.scalars(units_stmt)
+        units = list(units_result.all())
+        
+        if not units:
+            await callback.message.edit_text(
+                f"❌ {degree} darajasida Unitlar topilmadi."
+            )
+            await callback.answer()
+            await state.clear()
+            return
+        
+        # Count word lists and words
+        total_word_lists = 0
+        total_words = 0
+        
+        for unit in units:
+            word_lists_stmt = select(WordList).where(WordList.unit_id == unit.id)
+            word_lists_result = await session.scalars(word_lists_stmt)
+            word_lists = list(word_lists_result.all())
+            total_word_lists += len(word_lists)
+            
+            for wl in word_lists:
+                words_stmt = select(Word).where(Word.word_list_id == wl.id)
+                words_result = await session.scalars(words_stmt)
+                total_words += len(list(words_result.all()))
+        
+        await state.update_data(degree=degree)
+        await state.set_state(DeleteDegreeStates.confirming_delete)
+        
+        text = (
+            f"⚠️ <b>Degree (CEFR daraja)ni o'chirish</b>\n\n"
+            f"CEFR daraja: <b>{degree}</b>\n"
+            f"Unitlar soni: <b>{len(units)}</b>\n"
+            f"So'zlar ro'yxatlari: <b>{total_word_lists}</b>\n"
+            f"Jami so'zlar: <b>{total_words}</b>\n\n"
+            f"⚠️ Bu Degree ni o'chirish barcha Unitlarni, so'zlar ro'yxatlarini va so'zlarni ham o'chiradi!\n\n"
+            f"Bu Degree ni o'chirishni tasdiqlaysizmi?"
+        )
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data="degree_delete_confirm"),
+                    InlineKeyboardButton(text="❌ Yo'q", callback_data="degree_delete_cancel"),
+                ]
+            ]
+        )
+        
+        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+
+
+@dp.callback_query(DeleteDegreeStates.choosing_degree, F.data == "degree_delete_cancel")
+async def delete_degree_cancel_selection(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text("❌ Bekor qilindi.")
+    await callback.answer()
+    await state.clear()
+
+
+@dp.callback_query(DeleteDegreeStates.confirming_delete, F.data == "degree_delete_confirm")
+async def delete_degree_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    degree = data.get("degree")
+    
+    if not degree:
+        await callback.answer("Xatolik: Degree topilmadi.", show_alert=True)
+        await state.clear()
+        return
+    
+    async for session in get_session():
+        # Get all units for this degree
+        units_stmt = select(Unit).where(Unit.cefr_level == degree)
+        units_result = await session.scalars(units_stmt)
+        units = list(units_result.all())
+        
+        if not units:
+            await callback.answer("Bu Degree da Unitlar topilmadi.", show_alert=True)
+            await state.clear()
+            return
+        
+        # Count before deletion
+        total_word_lists = 0
+        total_words = 0
+        
+        for unit in units:
+            word_lists_stmt = select(WordList).where(WordList.unit_id == unit.id)
+            word_lists_result = await session.scalars(word_lists_stmt)
+            word_lists = list(word_lists_result.all())
+            total_word_lists += len(word_lists)
+            
+            for wl in word_lists:
+                words_stmt = select(Word).where(Word.word_list_id == wl.id)
+                words_result = await session.scalars(words_stmt)
+                total_words += len(list(words_result.all()))
+        
+        # Delete all units (cascade will delete word_lists and words)
+        for unit in units:
+            await session.delete(unit)
+        
+        await session.commit()
+        
+        await callback.message.edit_text(
+            f"✅ Degree muvaffaqiyatli o'chirildi!\n\n"
+            f"CEFR daraja: <b>{degree}</b>\n"
+            f"O'chirilgan Unitlar: <b>{len(units)}</b>\n"
+            f"O'chirilgan so'zlar ro'yxatlari: <b>{total_word_lists}</b>\n"
+            f"O'chirilgan so'zlar: <b>{total_words}</b>"
+        )
+        await callback.answer("Degree o'chirildi.")
+        await state.clear()
+
+
+@dp.callback_query(DeleteDegreeStates.confirming_delete, F.data == "degree_delete_cancel")
+async def delete_degree_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text("❌ O'chirish bekor qilindi.")
     await callback.answer()
     await state.clear()

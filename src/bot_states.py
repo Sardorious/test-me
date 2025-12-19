@@ -34,3 +34,14 @@ class DeleteWordsStates(StatesGroup):
     confirming_delete = State()
 
 
+class DeleteUnitStates(StatesGroup):
+    choosing_level = State()
+    choosing_unit = State()
+    confirming_delete = State()
+
+
+class DeleteDegreeStates(StatesGroup):
+    choosing_degree = State()
+    confirming_delete = State()
+
+
