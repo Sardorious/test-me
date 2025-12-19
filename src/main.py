@@ -2702,52 +2702,64 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
         
         await message.answer(f"📊 {len(matching_sheets)} ta mos sheet topildi. Import qilinmoqda...")
         
-        # First, create all needed units in one transaction to avoid conflicts
+        # First, ensure all needed units exist (create if needed, get if exists)
         async for session in get_session():
             units_cache = {}  # Cache units by (cefr_level, unit_number)
             
+            # Collect all unique (cefr_level, unit_number) pairs
+            needed_units = set()
             for sheet_info in matching_sheets:
                 cefr_level = sheet_info['cefr_level'] or 'A1'
                 unit_numbers = sheet_info['unit_numbers']
-                
                 for unit_number in unit_numbers:
-                    cache_key = (cefr_level, unit_number)
-                    if cache_key not in units_cache:
-                        # Check if unit exists
-                        stmt = select(Unit).where(
-                            Unit.cefr_level == cefr_level,
-                            Unit.unit_number == unit_number
+                    needed_units.add((cefr_level, unit_number))
+            
+            # Get or create all needed units
+            for cefr_level, unit_number in needed_units:
+                # Check if unit exists
+                stmt = select(Unit).where(
+                    Unit.cefr_level == cefr_level,
+                    Unit.unit_number == unit_number
+                )
+                unit = await session.scalar(stmt)
+                
+                if not unit:
+                    # Create unit - handle duplicate gracefully
+                    try:
+                        unit = Unit(
+                            name=f"Unit {unit_number}",
+                            cefr_level=cefr_level,
+                            unit_number=unit_number,
                         )
-                        unit = await session.scalar(stmt)
-                        
-                        if not unit:
-                            # Create unit
-                            try:
-                                unit = Unit(
-                                    name=f"Unit {unit_number}",
-                                    cefr_level=cefr_level,
-                                    unit_number=unit_number,
-                                )
-                                session.add(unit)
-                                await session.flush()
-                                await session.refresh(unit)
-                            except Exception as e:
-                                # If unit already exists (race condition), get it
-                                from sqlalchemy.exc import IntegrityError
-                                error_str = str(e).lower()
-                                if isinstance(e, IntegrityError) or "unique" in error_str or "duplicate" in error_str:
-                                    await session.rollback()
-                                    stmt = select(Unit).where(
-                                        Unit.cefr_level == cefr_level,
-                                        Unit.unit_number == unit_number
-                                    )
-                                    unit = await session.scalar(stmt)
-                                    if not unit:
-                                        raise ValueError(f"Could not create or find unit {cefr_level} Unit-{unit_number}")
-                                else:
-                                    raise
-                        
-                        units_cache[cache_key] = unit
+                        session.add(unit)
+                        await session.flush()
+                        await session.refresh(unit)
+                    except Exception as e:
+                        # If unit already exists (e.g., created concurrently), get it
+                        from sqlalchemy.exc import IntegrityError
+                        error_str = str(e).lower()
+                        if isinstance(e, IntegrityError) or "unique" in error_str or "duplicate" in error_str or "already exists" in error_str:
+                            # Rollback the failed insert
+                            await session.rollback()
+                            # Get existing unit (should exist now)
+                            stmt = select(Unit).where(
+                                Unit.cefr_level == cefr_level,
+                                Unit.unit_number == unit_number
+                            )
+                            unit = await session.scalar(stmt)
+                            # If still not found, it's a real problem
+                            if not unit:
+                                # This is unexpected - the unit should exist if we got IntegrityError
+                                # Skip this unit - it might be created by another process
+                                print(f"Warning: Unit {cefr_level} Unit-{unit_number} not found after IntegrityError")
+                                continue  # Skip this unit for now
+                        else:
+                            # Different error, re-raise
+                            raise
+                
+                # Add to cache (unit should exist at this point)
+                if unit:
+                    units_cache[(cefr_level, unit_number)] = unit
             
             await session.commit()
         
@@ -2800,66 +2812,114 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                     import_results.append(f"⚠️ {target_sheet}: so'zlar topilmadi")
                     continue
                 
-                # Get Units from cache (already created above)
+                # Get Units (already created above, just fetch them)
                 imported_units = []
                 total_words_added = 0
                 
                 async for session in get_session():
-                    for unit_number in unit_numbers:
-                        # Get unit from database (should exist from previous step)
-                        stmt = select(Unit).where(
-                            Unit.cefr_level == cefr_level,
-                            Unit.unit_number == unit_number
-                        )
-                        unit = await session.scalar(stmt)
-                        
-                        if not unit:
-                            # Fallback: create if somehow missing
-                            unit = Unit(
-                                name=f"Unit {unit_number}",
-                                cefr_level=cefr_level,
-                                unit_number=unit_number,
+                    try:
+                        for unit_number in unit_numbers:
+                            # Get unit from database (should exist from previous step)
+                            stmt = select(Unit).where(
+                                Unit.cefr_level == cefr_level,
+                                Unit.unit_number == unit_number
                             )
-                            session.add(unit)
+                            unit = await session.scalar(stmt)
+                            
+                            if not unit:
+                                # This shouldn't happen, but if it does, skip this unit
+                                import_results.append(f"⚠️ {target_sheet}: Unit {cefr_level} Unit-{unit_number} topilmadi")
+                                continue
+                            
+                            # Create word list for this unit
+                            word_list = WordList(
+                                name=f"{target_sheet}_Unit{unit_number}_import_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                                unit_id=unit.id,
+                                owner_id=user.id,
+                            )
+                            session.add(word_list)
                             await session.flush()
-                            await session.refresh(unit)
+                            
+                            # Add words
+                            words_to_add = []
+                            for turkish, uzbek in words_parsed:
+                                word = Word(
+                                    turkish=turkish,
+                                    uzbek=uzbek,
+                                    word_list_id=word_list.id,
+                                )
+                                words_to_add.append(word)
+                            
+                            session.add_all(words_to_add)
+                            total_words_added += len(words_to_add)
+                            imported_units.append(f"{cefr_level} Unit-{unit_number}")
                         
-                        # Create word list for this unit
-                        word_list = WordList(
-                            name=f"{target_sheet}_Unit{unit_number}_import_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-                            unit_id=unit.id,
-                            owner_id=user.id,
+                        await session.commit()
+                        
+                        total_imported += total_words_added
+                        units_text = ", ".join(imported_units)
+                        import_results.append(
+                            f"✅ {target_sheet}: {valid_count} so'z → {units_text}"
                         )
-                        session.add(word_list)
-                        await session.flush()
-                        
-                        # Add words
-                        words_to_add = []
-                        for turkish, uzbek in words_parsed:
-                            word = Word(
-                                turkish=turkish,
-                                uzbek=uzbek,
-                                word_list_id=word_list.id,
-                            )
-                            words_to_add.append(word)
-                        
-                        session.add_all(words_to_add)
-                        total_words_added += len(words_to_add)
-                        imported_units.append(f"{cefr_level} Unit-{unit_number}")
-                    
-                    await session.commit()
-                
-                total_imported += total_words_added
-                units_text = ", ".join(imported_units)
-                import_results.append(
-                    f"✅ {target_sheet}: {valid_count} so'z → {units_text}"
-                )
+                    except Exception as db_error:
+                        await session.rollback()
+                        # Re-raise to be caught by outer exception handler
+                        raise
                 
             except Exception as e:
                 error_msg = str(e)
                 # Show more details for IntegrityError
                 if "IntegrityError" in error_msg or "unique" in error_msg.lower() or "duplicate" in error_msg.lower():
-                    import_results.append(f"❌ {target_sheet}: Unit allaqachon mavjud yoki duplicate")
+                    # IntegrityError during unit creation - units should exist, try to import words anyway
+                    if words_parsed:
+                        try:
+                            async for session in get_session():
+                                # Try to get units and import words
+                                imported_units = []
+                                total_words_added = 0
+                                
+                                for unit_number in unit_numbers:
+                                    stmt = select(Unit).where(
+                                        Unit.cefr_level == cefr_level,
+                                        Unit.unit_number == unit_number
+                                    )
+                                    unit = await session.scalar(stmt)
+                                    
+                                    if unit:
+                                        # Create word list
+                                        word_list = WordList(
+                                            name=f"{target_sheet}_Unit{unit_number}_import_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                                            unit_id=unit.id,
+                                            owner_id=user.id,
+                                        )
+                                        session.add(word_list)
+                                        await session.flush()
+                                        
+                                        # Add words
+                                        words_to_add = []
+                                        for turkish, uzbek in words_parsed:
+                                            word = Word(
+                                                turkish=turkish,
+                                                uzbek=uzbek,
+                                                word_list_id=word_list.id,
+                                            )
+                                            words_to_add.append(word)
+                                        
+                                        session.add_all(words_to_add)
+                                        total_words_added += len(words_to_add)
+                                        imported_units.append(f"{cefr_level} Unit-{unit_number}")
+                                
+                                if imported_units:
+                                    await session.commit()
+                                    total_imported += total_words_added
+                                    units_text = ", ".join(imported_units)
+                                    import_results.append(f"✅ {target_sheet}: {valid_count} so'z → {units_text}")
+                                else:
+                                    import_results.append(f"⚠️ {target_sheet}: Unitlar topilmadi")
+                        except Exception as e2:
+                            import_results.append(f"❌ {target_sheet}: xatolik - {str(e2)[:80]}")
+                    else:
+                        import_results.append(f"⚠️ {target_sheet}: so'zlar topilmadi")
                 else:
                     import_results.append(f"❌ {target_sheet}: xatolik - {error_msg[:100]}")
         
