@@ -2538,19 +2538,66 @@ def parse_sheet_name(sheet_name: str) -> tuple[str | None, list[int] | None]:
 
 def get_google_sheets_service():
     """Get authenticated Google Sheets service."""
-    from google.oauth2 import service_account
     from googleapiclient.discovery import build
     
-    if not settings.google_sheets_credentials_path:
-        raise ValueError("GOOGLE_SHEETS_CREDENTIALS_PATH not configured")
+    # Try API key first (for public sheets)
+    if settings.google_sheets_api_key:
+        service = build('sheets', 'v4', developerKey=settings.google_sheets_api_key)
+        return service
     
-    credentials = service_account.Credentials.from_service_account_file(
-        settings.google_sheets_credentials_path,
-        scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+    # Fall back to service account (for private sheets)
+    if settings.google_sheets_credentials_path:
+        import json
+        import os
+        from google.oauth2 import service_account
+        
+        # Check if file exists
+        if not os.path.exists(settings.google_sheets_credentials_path):
+            raise FileNotFoundError(
+                f"Google Sheets credentials file not found: {settings.google_sheets_credentials_path}\n"
+                f"Please check the path in your .env file."
+            )
+        
+        # Validate JSON file first
+        try:
+            with open(settings.google_sheets_credentials_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                # Try to parse JSON
+                json_data = json.loads(content)
+                # Check if it has required fields
+                if 'type' not in json_data or json_data.get('type') != 'service_account':
+                    raise ValueError("JSON file is not a valid service account key")
+                if 'client_email' not in json_data:
+                    raise ValueError("JSON file is missing 'client_email' field")
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Invalid JSON in credentials file: {str(e)}\n"
+                f"File: {settings.google_sheets_credentials_path}\n"
+                f"Please ensure the file contains valid JSON only (no extra text or comments)."
+            )
+        except Exception as e:
+            raise ValueError(f"Error reading/validating credentials file: {str(e)}")
+        
+        # Load credentials
+        try:
+            credentials = service_account.Credentials.from_service_account_file(
+                settings.google_sheets_credentials_path,
+                scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Error loading Google Sheets credentials: {str(e)}\n"
+                f"Please verify the JSON file is a valid service account key from Google Cloud Console."
+            )
+        
+        service = build('sheets', 'v4', credentials=credentials)
+        return service
+    
+    raise ValueError(
+        "Google Sheets authentication not configured.\n"
+        "For public sheets: Set GOOGLE_SHEETS_API_KEY in .env\n"
+        "For private sheets: Set GOOGLE_SHEETS_CREDENTIALS_PATH in .env"
     )
-    
-    service = build('sheets', 'v4', credentials=credentials)
-    return service
 
 
 @dp.message(Command("import_google_sheets"))
@@ -2561,10 +2608,11 @@ async def cmd_import_google_sheets(message: Message, state: FSMContext) -> None:
         await message.answer("Bu buyruq faqat o'qituvchilar va adminlar uchun.")
         return
     
-    if not settings.google_sheets_credentials_path:
+    if not settings.google_sheets_api_key and not settings.google_sheets_credentials_path:
         await message.answer(
             "❌ Google Sheets integratsiyasi sozlashmagan.\n\n"
-            "Iltimos, GOOGLE_SHEETS_CREDENTIALS_PATH o'rnating."
+            "Public sheetlar uchun: GOOGLE_SHEETS_API_KEY o'rnating\n"
+            "Private sheetlar uchun: GOOGLE_SHEETS_CREDENTIALS_PATH o'rnating"
         )
         return
     
