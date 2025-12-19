@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from html import escape
 from random import shuffle
 
 from aiogram import Bot, Dispatcher, F
@@ -2686,11 +2687,12 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                 })
         
         if not matching_sheets:
+            sheet_titles = [escape(s.get('properties', {}).get('title', '')) for s in sheets[:10]]
             await message.answer(
                 "❌ Hech qanday mos sheet topilmadi.\n\n"
                 "Sheet nomi quyidagi formatda bo'lishi kerak:\n"
                 "<code>A1 Unit-1</code>, <code>Unit-1</code>, <code>A2 Unit-1,2</code>, va hokazo.\n\n"
-                "Topilgan sheetlar:\n" + "\n".join([s.get('properties', {}).get('title', '') for s in sheets[:10]])
+                "Topilgan sheetlar:\n" + "\n".join(sheet_titles)
             )
             await state.clear()
             return
@@ -2780,7 +2782,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                 values = result.get('values', [])
                 
                 if not values:
-                    import_results.append(f"⚠️ {target_sheet}: bo'sh")
+                    import_results.append(f"⚠️ {escape(target_sheet)}: bo'sh")
                     continue
                 
                 # Parse words: B column = Turkish, C column = Uzbek translations
@@ -2809,7 +2811,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                     valid_count += 1
                 
                 if not words_parsed:
-                    import_results.append(f"⚠️ {target_sheet}: so'zlar topilmadi")
+                    import_results.append(f"⚠️ {escape(target_sheet)}: so'zlar topilmadi")
                     continue
                 
                 # Get Units (already created above, just fetch them)
@@ -2828,7 +2830,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                             
                             if not unit:
                                 # This shouldn't happen, but if it does, skip this unit
-                                import_results.append(f"⚠️ {target_sheet}: Unit {cefr_level} Unit-{unit_number} topilmadi")
+                                import_results.append(f"⚠️ {escape(target_sheet)}: Unit {cefr_level} Unit-{unit_number} topilmadi")
                                 continue
                             
                             # Create word list for this unit
@@ -2859,7 +2861,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                         total_imported += total_words_added
                         units_text = ", ".join(imported_units)
                         import_results.append(
-                            f"✅ {target_sheet}: {valid_count} so'z → {units_text}"
+                            f"✅ {escape(target_sheet)}: {valid_count} so'z → {escape(units_text)}"
                         )
                     except Exception as db_error:
                         await session.rollback()
@@ -2913,15 +2915,15 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                                     await session.commit()
                                     total_imported += total_words_added
                                     units_text = ", ".join(imported_units)
-                                    import_results.append(f"✅ {target_sheet}: {valid_count} so'z → {units_text}")
+                                    import_results.append(f"✅ {escape(target_sheet)}: {valid_count} so'z → {escape(units_text)}")
                                 else:
-                                    import_results.append(f"⚠️ {target_sheet}: Unitlar topilmadi")
+                                    import_results.append(f"⚠️ {escape(target_sheet)}: Unitlar topilmadi")
                         except Exception as e2:
-                            import_results.append(f"❌ {target_sheet}: xatolik - {str(e2)[:80]}")
+                            import_results.append(f"❌ {escape(target_sheet)}: xatolik - {escape(str(e2)[:80])}")
                     else:
-                        import_results.append(f"⚠️ {target_sheet}: so'zlar topilmadi")
+                        import_results.append(f"⚠️ {escape(target_sheet)}: so'zlar topilmadi")
                 else:
-                    import_results.append(f"❌ {target_sheet}: xatolik - {error_msg[:100]}")
+                    import_results.append(f"❌ {escape(target_sheet)}: xatolik - {escape(error_msg[:100])}")
         
         # Success message with all results
         success_msg = (
@@ -2935,7 +2937,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
         await state.clear()
         
     except Exception as e:
-        error_msg = f"❌ Xatolik yuz berdi: {str(e)}"
+        error_msg = f"❌ Xatolik yuz berdi: {escape(str(e))}"
         if "credentials" in str(e).lower() or "permission" in str(e).lower():
             error_msg += "\n\n💡 Eslatma: Google Sheet ni service account email ga share qilish kerak."
         await message.answer(error_msg)
