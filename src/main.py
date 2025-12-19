@@ -2702,6 +2702,56 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
         
         await message.answer(f"📊 {len(matching_sheets)} ta mos sheet topildi. Import qilinmoqda...")
         
+        # First, create all needed units in one transaction to avoid conflicts
+        async for session in get_session():
+            units_cache = {}  # Cache units by (cefr_level, unit_number)
+            
+            for sheet_info in matching_sheets:
+                cefr_level = sheet_info['cefr_level'] or 'A1'
+                unit_numbers = sheet_info['unit_numbers']
+                
+                for unit_number in unit_numbers:
+                    cache_key = (cefr_level, unit_number)
+                    if cache_key not in units_cache:
+                        # Check if unit exists
+                        stmt = select(Unit).where(
+                            Unit.cefr_level == cefr_level,
+                            Unit.unit_number == unit_number
+                        )
+                        unit = await session.scalar(stmt)
+                        
+                        if not unit:
+                            # Create unit
+                            try:
+                                unit = Unit(
+                                    name=f"Unit {unit_number}",
+                                    cefr_level=cefr_level,
+                                    unit_number=unit_number,
+                                )
+                                session.add(unit)
+                                await session.flush()
+                                await session.refresh(unit)
+                            except Exception as e:
+                                # If unit already exists (race condition), get it
+                                from sqlalchemy.exc import IntegrityError
+                                error_str = str(e).lower()
+                                if isinstance(e, IntegrityError) or "unique" in error_str or "duplicate" in error_str:
+                                    await session.rollback()
+                                    stmt = select(Unit).where(
+                                        Unit.cefr_level == cefr_level,
+                                        Unit.unit_number == unit_number
+                                    )
+                                    unit = await session.scalar(stmt)
+                                    if not unit:
+                                        raise ValueError(f"Could not create or find unit {cefr_level} Unit-{unit_number}")
+                                else:
+                                    raise
+                        
+                        units_cache[cache_key] = unit
+            
+            await session.commit()
+        
+        # Now process each sheet
         for sheet_info in matching_sheets:
             target_sheet = sheet_info['title']
             cefr_level = sheet_info['cefr_level'] or 'A1'  # Default to A1 if not specified
@@ -2750,13 +2800,13 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                     import_results.append(f"⚠️ {target_sheet}: so'zlar topilmadi")
                     continue
                 
-                # Get or create Units (handle multiple units in one sheet)
+                # Get Units from cache (already created above)
                 imported_units = []
                 total_words_added = 0
                 
                 async for session in get_session():
                     for unit_number in unit_numbers:
-                        # Check if unit exists
+                        # Get unit from database (should exist from previous step)
                         stmt = select(Unit).where(
                             Unit.cefr_level == cefr_level,
                             Unit.unit_number == unit_number
@@ -2764,7 +2814,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                         unit = await session.scalar(stmt)
                         
                         if not unit:
-                            # Create unit
+                            # Fallback: create if somehow missing
                             unit = Unit(
                                 name=f"Unit {unit_number}",
                                 cefr_level=cefr_level,
@@ -2772,6 +2822,7 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                             )
                             session.add(unit)
                             await session.flush()
+                            await session.refresh(unit)
                         
                         # Create word list for this unit
                         word_list = WordList(
@@ -2805,7 +2856,12 @@ async def process_google_sheets_import(message: Message, url: str, state: FSMCon
                 )
                 
             except Exception as e:
-                import_results.append(f"❌ {target_sheet}: xatolik - {str(e)[:50]}")
+                error_msg = str(e)
+                # Show more details for IntegrityError
+                if "IntegrityError" in error_msg or "unique" in error_msg.lower() or "duplicate" in error_msg.lower():
+                    import_results.append(f"❌ {target_sheet}: Unit allaqachon mavjud yoki duplicate")
+                else:
+                    import_results.append(f"❌ {target_sheet}: xatolik - {error_msg[:100]}")
         
         # Success message with all results
         success_msg = (
