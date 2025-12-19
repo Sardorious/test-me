@@ -2501,19 +2501,38 @@ def extract_spreadsheet_id(url: str) -> str | None:
     return None
 
 
-def parse_sheet_name(sheet_name: str) -> tuple[str | None, int | None]:
+def parse_sheet_name(sheet_name: str) -> tuple[str | None, list[int] | None]:
     """
-    Parse sheet name to extract CEFR level and Unit number.
-    Examples: "A1 Unit-1" -> (A1, 1), "B2 Unit-5" -> (B2, 5)
+    Parse sheet name to extract CEFR level and Unit number(s).
+    Examples: 
+    - "A1 Unit-1" -> (A1, [1])
+    - "Unit-1" -> (None, [1])  # No CEFR level, default to A1
+    - "A2 Unit-1,2" -> (A2, [1, 2])
+    - "Unit-4,5,6" -> (None, [4, 5, 6])
+    Returns: (cefr_level, list of unit_numbers)
     """
     import re
-    # Pattern: {CEFR_LEVEL} Unit-{NUMBER} or {CEFR_LEVEL} Unit {NUMBER}
-    pattern = r'([A-C][1-2])\s+Unit[- ]?(\d+)'
-    match = re.search(pattern, sheet_name, re.IGNORECASE)
-    if match:
-        cefr_level = match.group(1).upper()
-        unit_number = int(match.group(2))
-        return cefr_level, unit_number
+    
+    # Pattern 1: {CEFR_LEVEL} Unit-{NUMBER} or {CEFR_LEVEL} Unit {NUMBER}
+    pattern1 = r'([A-C][1-2])\s+Unit[- ]?(\d+(?:[,\s]+\d+)*)'
+    match1 = re.search(pattern1, sheet_name, re.IGNORECASE)
+    if match1:
+        cefr_level = match1.group(1).upper()
+        units_str = match1.group(2)
+        # Parse multiple units: "1,2" or "1, 2" or "4,5,6"
+        unit_numbers = [int(u.strip()) for u in re.split(r'[,\s]+', units_str) if u.strip().isdigit()]
+        if unit_numbers:
+            return cefr_level, unit_numbers
+    
+    # Pattern 2: Unit-{NUMBER} without CEFR level (default to A1)
+    pattern2 = r'Unit[- ]?(\d+(?:[,\s]+\d+)*)'
+    match2 = re.search(pattern2, sheet_name, re.IGNORECASE)
+    if match2:
+        units_str = match2.group(1)
+        unit_numbers = [int(u.strip()) for u in re.split(r'[,\s]+', units_str) if u.strip().isdigit()]
+        if unit_numbers:
+            return None, unit_numbers  # None means default to A1
+    
     return None, None
 
 
@@ -2549,15 +2568,23 @@ async def cmd_import_google_sheets(message: Message, state: FSMContext) -> None:
         )
         return
     
-    await state.set_state(GoogleSheetsStates.waiting_sheet_url)
-    await message.answer(
-        "📊 Google Sheets dan so'zlar import qilish.\n\n"
-        "Google Sheets URL ni yuboring.\n\n"
-        "Format: Sheet nomi <b>A1 Unit-1</b> formatida bo'lishi kerak.\n"
-        "B ustuni: Turkcha so'zlar\n"
-        "C ustuni: O'zbekcha tarjimalar (bir nechta bo'lsa, ; bilan ajratilgan)\n\n"
-        "Masalan: <code>https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit</code>"
-    )
+    # Check if URL is provided as command argument
+    command_args = message.text.split(maxsplit=1)
+    if len(command_args) > 1:
+        url = command_args[1].strip()
+        # Process immediately
+        await process_google_sheets_import(message, url, state)
+    else:
+        # Wait for URL
+        await state.set_state(GoogleSheetsStates.waiting_sheet_url)
+        await message.answer(
+            "📊 Google Sheets dan so'zlar import qilish.\n\n"
+            "Google Sheets URL ni yuboring.\n\n"
+            "<b>Format:</b> Sheet nomi <code>A1 Unit-1</code> formatida bo'lishi kerak.\n"
+            "B ustuni: Turkcha so'zlar\n"
+            "C ustuni: O'zbekcha tarjimalar\n\n"
+            "Masalan: <code>https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit</code>"
+        )
 
 
 @dp.message(GoogleSheetsStates.waiting_sheet_url)
@@ -2568,6 +2595,11 @@ async def handle_google_sheets_url(message: Message, state: FSMContext) -> None:
         await message.answer("Iltimos, Google Sheets URL ni yuboring.")
         return
     
+    await process_google_sheets_import(message, url, state)
+
+
+async def process_google_sheets_import(message: Message, url: str, state: FSMContext) -> None:
+    """Process Google Sheets import from URL."""
     spreadsheet_id = extract_spreadsheet_id(url)
     if not spreadsheet_id:
         await message.answer(
@@ -2575,6 +2607,7 @@ async def handle_google_sheets_url(message: Message, state: FSMContext) -> None:
             "Iltimos, to'g'ri Google Sheets URL ni yuboring.\n"
             "Masalan: <code>https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit</code>"
         )
+        await state.clear()
         return
     
     await message.answer("📥 Google Sheets dan ma'lumotlar olinmoqda...")
@@ -2591,138 +2624,148 @@ async def handle_google_sheets_url(message: Message, state: FSMContext) -> None:
             await state.clear()
             return
         
-        # Find sheet matching pattern "A1 Unit-1", "B2 Unit-5", etc.
-        target_sheet = None
-        cefr_level = None
-        unit_number = None
+        # Find sheets matching pattern "A1 Unit-1", "Unit-1", "A2 Unit-1,2", etc.
+        matching_sheets = []
         
         for sheet in sheets:
             sheet_title = sheet.get('properties', {}).get('title', '')
-            parsed_level, parsed_unit = parse_sheet_name(sheet_title)
-            if parsed_level and parsed_unit:
-                target_sheet = sheet_title
-                cefr_level = parsed_level
-                unit_number = parsed_unit
-                break
+            parsed_level, parsed_units = parse_sheet_name(sheet_title)
+            if parsed_units:  # Found at least one unit
+                matching_sheets.append({
+                    'title': sheet_title,
+                    'cefr_level': parsed_level,  # None means default to A1
+                    'unit_numbers': parsed_units
+                })
         
-        if not target_sheet:
+        if not matching_sheets:
             await message.answer(
-                "❌ Sheet nomi to'g'ri formatda emas.\n\n"
+                "❌ Hech qanday mos sheet topilmadi.\n\n"
                 "Sheet nomi quyidagi formatda bo'lishi kerak:\n"
-                "<code>A1 Unit-1</code>, <code>B2 Unit-5</code>, va hokazo.\n\n"
-                "Topilgan sheetlar:\n" + "\n".join([s.get('properties', {}).get('title', '') for s in sheets])
+                "<code>A1 Unit-1</code>, <code>Unit-1</code>, <code>A2 Unit-1,2</code>, va hokazo.\n\n"
+                "Topilgan sheetlar:\n" + "\n".join([s.get('properties', {}).get('title', '') for s in sheets[:10]])
             )
             await state.clear()
             return
         
-        # Read data from columns B and C (skip header row if exists)
-        range_name = f"{target_sheet}!B:C"
-        result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=range_name
-        ).execute()
-        
-        values = result.get('values', [])
-        
-        if not values:
-            await message.answer("❌ Sheet bo'sh yoki ma'lumotlar topilmadi.")
-            await state.clear()
-            return
-        
-        # Parse words: B column = Turkish, C column = Uzbek translations
-        words_parsed = []
-        valid_count = 0
-        error_count = 0
-        errors = []
-        
-        for row_num, row in enumerate(values, start=1):
-            # Skip empty rows
-            if not row or len(row) < 2:
-                continue
-            
-            turkish = row[0].strip() if len(row) > 0 and row[0] else ""
-            uzbek_raw = row[1].strip() if len(row) > 1 and row[1] else ""
-            
-            if not turkish or not uzbek_raw:
-                error_count += 1
-                errors.append(f"Qator {row_num}: bo'sh so'z")
-                continue
-            
-            # Clean up multiple translations (remove extra spaces, normalize separators)
-            uzbek_translations = [t.strip() for t in uzbek_raw.split(";")]
-            uzbek_translations = [t for t in uzbek_translations if t]  # Remove empty strings
-            uzbek = "; ".join(uzbek_translations)  # Join with "; " for storage
-            
-            words_parsed.append((turkish, uzbek))
-            valid_count += 1
-        
-        if not words_parsed:
-            await message.answer(
-                "❌ Hech qanday to'g'ri so'z topilmadi.\n\n"
-                "B ustuni: Turkcha so'zlar\n"
-                "C ustuni: O'zbekcha tarjimalar"
-            )
-            await state.clear()
-            return
-        
-        # Get or create Unit
+        # Process ALL matching sheets automatically
         user = await get_or_create_user(message.from_user)
+        total_imported = 0
+        import_results = []
         
-        async for session in get_session():
-            # Check if unit exists
-            stmt = select(Unit).where(
-                Unit.cefr_level == cefr_level,
-                Unit.unit_number == unit_number
-            )
-            unit = await session.scalar(stmt)
-            
-            if not unit:
-                # Create unit
-                unit = Unit(
-                    name=f"Unit {unit_number}",
-                    cefr_level=cefr_level,
-                    unit_number=unit_number,
-                )
-                session.add(unit)
-                await session.flush()
-            
-            # Create word list
-            word_list = WordList(
-                name=f"{target_sheet}_import_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
-                unit_id=unit.id,
-                owner_id=user.id,
-            )
-            session.add(word_list)
-            await session.flush()
-            
-            # Add words
-            words_to_add = []
-            for turkish, uzbek in words_parsed:
-                word = Word(
-                    turkish=turkish,
-                    uzbek=uzbek,
-                    word_list_id=word_list.id,
-                )
-                words_to_add.append(word)
-            
-            session.add_all(words_to_add)
-            await session.commit()
+        await message.answer(f"📊 {len(matching_sheets)} ta mos sheet topildi. Import qilinmoqda...")
         
-        # Success message
+        for sheet_info in matching_sheets:
+            target_sheet = sheet_info['title']
+            cefr_level = sheet_info['cefr_level'] or 'A1'  # Default to A1 if not specified
+            unit_numbers = sheet_info['unit_numbers']
+            
+            try:
+                # Read data from columns B and C
+                range_name = f"{target_sheet}!B:C"
+                result = service.spreadsheets().values().get(
+                    spreadsheetId=spreadsheet_id,
+                    range=range_name
+                ).execute()
+                
+                values = result.get('values', [])
+                
+                if not values:
+                    import_results.append(f"⚠️ {target_sheet}: bo'sh")
+                    continue
+                
+                # Parse words: B column = Turkish, C column = Uzbek translations
+                words_parsed = []
+                valid_count = 0
+                error_count = 0
+                
+                for row_num, row in enumerate(values, start=1):
+                    # Skip empty rows
+                    if not row or len(row) < 2:
+                        continue
+                    
+                    turkish = row[0].strip() if len(row) > 0 and row[0] else ""
+                    uzbek_raw = row[1].strip() if len(row) > 1 and row[1] else ""
+                    
+                    if not turkish or not uzbek_raw:
+                        error_count += 1
+                        continue
+                    
+                    # Clean up multiple translations (remove extra spaces, normalize separators)
+                    uzbek_translations = [t.strip() for t in uzbek_raw.split(";")]
+                    uzbek_translations = [t for t in uzbek_translations if t]  # Remove empty strings
+                    uzbek = "; ".join(uzbek_translations)  # Join with "; " for storage
+                    
+                    words_parsed.append((turkish, uzbek))
+                    valid_count += 1
+                
+                if not words_parsed:
+                    import_results.append(f"⚠️ {target_sheet}: so'zlar topilmadi")
+                    continue
+                
+                # Get or create Units (handle multiple units in one sheet)
+                imported_units = []
+                total_words_added = 0
+                
+                async for session in get_session():
+                    for unit_number in unit_numbers:
+                        # Check if unit exists
+                        stmt = select(Unit).where(
+                            Unit.cefr_level == cefr_level,
+                            Unit.unit_number == unit_number
+                        )
+                        unit = await session.scalar(stmt)
+                        
+                        if not unit:
+                            # Create unit
+                            unit = Unit(
+                                name=f"Unit {unit_number}",
+                                cefr_level=cefr_level,
+                                unit_number=unit_number,
+                            )
+                            session.add(unit)
+                            await session.flush()
+                        
+                        # Create word list for this unit
+                        word_list = WordList(
+                            name=f"{target_sheet}_Unit{unit_number}_import_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+                            unit_id=unit.id,
+                            owner_id=user.id,
+                        )
+                        session.add(word_list)
+                        await session.flush()
+                        
+                        # Add words
+                        words_to_add = []
+                        for turkish, uzbek in words_parsed:
+                            word = Word(
+                                turkish=turkish,
+                                uzbek=uzbek,
+                                word_list_id=word_list.id,
+                            )
+                            words_to_add.append(word)
+                        
+                        session.add_all(words_to_add)
+                        total_words_added += len(words_to_add)
+                        imported_units.append(f"{cefr_level} Unit-{unit_number}")
+                    
+                    await session.commit()
+                
+                total_imported += total_words_added
+                units_text = ", ".join(imported_units)
+                import_results.append(
+                    f"✅ {target_sheet}: {valid_count} so'z → {units_text}"
+                )
+                
+            except Exception as e:
+                import_results.append(f"❌ {target_sheet}: xatolik - {str(e)[:50]}")
+        
+        # Success message with all results
         success_msg = (
-            f"✅ So'zlar muvaffaqiyatli import qilindi!\n\n"
-            f"Sheet: <b>{target_sheet}</b>\n"
-            f"CEFR daraja: <b>{cefr_level}</b>\n"
-            f"Unit: <b>Unit {unit_number}</b>\n"
-            f"To'g'ri so'zlar: <b>{valid_count}</b>\n"
+            f"✅ Import yakunlandi!\n\n"
+            f"Jami sheetlar: <b>{len(matching_sheets)}</b>\n"
+            f"Jami so'zlar: <b>{total_imported}</b>\n\n"
+            f"<b>Natijalar:</b>\n" + "\n".join(import_results)
         )
-        
-        if error_count > 0:
-            success_msg += f"Xatoliklar: <b>{error_count}</b>\n"
-            if len(errors) <= 5:
-                success_msg += "\nXatoliklar:\n" + "\n".join(errors[:5])
-            else:
-                success_msg += f"\nBirinchi 5 ta xatolik:\n" + "\n".join(errors[:5])
         
         await message.answer(success_msg)
         await state.clear()
